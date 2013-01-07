@@ -1,13 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-
-
-namespace FalconUDP
+﻿namespace FalconUDP
 {
     public delegate void TryCallback(TryResult result);
-
 
     public class TryResult
     {
@@ -15,7 +8,6 @@ namespace FalconUDP
         private string msg;
         private object tag;
         private static TryResult successResult = new TryResult(true, null);
-
 
         public bool Success { get { return success; } }
         public string NonSuccessMessage { get { return msg; } }
@@ -29,7 +21,6 @@ namespace FalconUDP
             : this(success, msg, null)
         {
         }
-
 
         public TryResult(bool success, string msg, object tag)
         {

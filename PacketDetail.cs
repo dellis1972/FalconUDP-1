@@ -1,8 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-
 
 namespace FalconUDP
 {
@@ -13,7 +9,6 @@ namespace FalconUDP
         internal byte[] RawPacket;
         internal Action ACKCallback;
         internal byte ACKTicks;
-
 
         internal PacketDetail(byte[] rawPacket, Action ackCallback)
         {

@@ -1,10 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-
-
-namespace FalconUDP
+﻿namespace FalconUDP
 {
     public class Packet
     {
