@@ -8,6 +8,8 @@ namespace FalconUDP
     class RemotePeer
     {
         internal int Id;
+        internal IPEndPoint EndPoint;
+
         private byte sendSeqCount;
         private int sendActualSeqCount;
         private int receivedSeqLoopCount;
@@ -18,7 +20,6 @@ namespace FalconUDP
         private SortedList<uint, Packet> receivedPackets;       // packets received from this peer not yet retrived by application TODO after a re-synch new packets will erroneously be pushed to the top of the list...
         private SortedList<int, PacketDetail> sentPacketsAwaitingACK;
         private List<int> sentPacketsAwaitingACKToRemove;
-        private IPEndPoint endPoint;
         private byte[] receiveBuffer;
         private byte[] sendBuffer;                              // buffer recycled for every packet sent to this peer
         private int sendPacketSize;                             // the size of the current packet to be sent in SendBuffer
@@ -37,7 +38,7 @@ namespace FalconUDP
         {
             this.Id = id;
             this.sendSeqCount = 0;
-            this.endPoint = endPoint;
+            this.EndPoint = endPoint;
             this.receiveBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
             this.sendBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
             this.sendPacketSize = 0;
@@ -148,7 +149,7 @@ namespace FalconUDP
 
             try
             {
-                Falcon.Sender.BeginSendTo(rawPacket, 0, rawPacket.Length, SocketFlags.None, endPoint, Falcon.EndSendToCallback, null);
+                Falcon.Sender.BeginSendTo(rawPacket, 0, rawPacket.Length, SocketFlags.None, EndPoint, Falcon.EndSendToCallback, null);
             }
             catch (SocketException se)
             {

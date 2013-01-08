@@ -84,7 +84,7 @@ namespace FalconUDP
         AntiACK     = 1,
         AddPeer     = 2,
         DropPeer    = 3,
-        Accept      = 4,
+        AcceptJoin  = 4,
         Resynch     = 5,
         Ping        = 6,
         Application = 7,
@@ -104,6 +104,7 @@ namespace FalconUDP
         internal const int ACK_TIMEOUT                      = 600;                              // milliseconds (should be multiple of ACK_TICK_TIME)
         internal const int ACK_TICK_TIME                    = 100;                              // milliseconds (note timer could tick just as packet sent so this also defines the error margin)
         internal const int ACK_TIMEOUT_TICKS                = ACK_TIMEOUT / ACK_TICK_TIME;      // timeout in ticks 
+        internal const int ACK_RETRY_ATTEMPTS               = 3;                                // number of times to retry until assuming peer is dead (used by AwaitingAcceptDetail too)
         internal const byte PAYLOAD_SIZE_TYPE_MASK          = 192;                              // 1100 0000 AND'd with packet info byte returns PayloadSizeHeaderType
         internal const byte SEND_OPTS_MASK                  = 48;                               // 0011 0000 AND'd with packet info byte returns SendOptions
         internal const byte PACKET_TYPE_MASK                = 15;                               // 0000 1111 AND'd with packet info byte returns PacketType
@@ -115,8 +116,10 @@ namespace FalconUDP
 
         internal const int OUT_OF_ORDER_TOLERANCE = HALF_MAX_SEQ_NUMS - 1;
 
-        internal const byte JOIN_PACKET_INFO = (byte)((byte)PacketType.AddPeer | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
-        internal const byte PING_PACKET_INFO = (byte)((byte)PacketType.Ping | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
+        internal const byte JOIN_PACKET_INFO    = (byte)((byte)PacketType.AddPeer | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
+        internal const byte ACCEPT_PACKET_INFO  = (byte)((byte)PacketType.AcceptJoin | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
+        internal const byte PING_PACKET_INFO    = (byte)((byte)PacketType.Ping | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
+
     }
 
     public static class Falcon
@@ -138,12 +141,14 @@ namespace FalconUDP
         private static Thread listenThread;
         private static bool stop;
         private static string networkPass;
-        private static Timer ackCheckTimer;
+        private static Timer ackCheckTimer;                             // also used for AwaitingAcceptDetail
         private static bool initialized;
         private static LogLevel logLvl;
         private static int peerIdCount;
         private static byte[] payloadSizeBytes;
         private static LogCallback logger;
+        private static List<AwaitingAcceptDetail> awaitingAcceptDetails;
+        private static List<AwaitingAcceptDetail> awaitingAcceptDetailsToRemove;
 
         static Falcon()
         {
@@ -186,6 +191,9 @@ namespace FalconUDP
             peerIdCount = 0;
 
             peersLockObject = new object();
+
+            awaitingAcceptDetails = new List<AwaitingAcceptDetail>();
+            awaitingAcceptDetailsToRemove = new List<AwaitingAcceptDetail>();
 
             payloadSizeBytes = new byte[2];
 
@@ -322,51 +330,62 @@ namespace FalconUDP
             }
         }
 
+        // called on first attempt
         private static void BeginTryJoinPeer(IPEndPoint endPoint, string pass, TryCallback callback)
         {
+            AwaitingAcceptDetail detail = new AwaitingAcceptDetail(endPoint, callback, pass);
+            AddWaitingAcceptDetail(detail);
+            BeginTryJoinPeer(detail);
+        }
+
+        // called directly when re-sending an AwaitingAcceptDetail already instantiated and in list
+        private static void BeginTryJoinPeer(AwaitingAcceptDetail detail)
+        {
+            // TODO what if called on another thread - may be best to dispatch access to sendBuffer on same thread
+
             Buffer.SetByte(sendBuffer, 0, 0);
             Buffer.SetByte(sendBuffer, 1, Const.JOIN_PACKET_INFO);
 
             int size = 0;
-            if (pass == null)
+            if (detail.Pass == null)
             {
                 Buffer.SetByte(sendBuffer, 2, 0);
                 size = Const.NORMAL_HEADER_SIZE;
             }
             else
             {
-                int count = Encoding.UTF8.GetByteCount(pass);
+                int count = Encoding.UTF8.GetByteCount(detail.Pass);
                 if (count > Byte.MaxValue)
                 {
-                    callback(new TryResult(false, "pass too long"));
+                    RemoveWaitingAcceptDetail(detail);
+                    detail.Callback(new TryResult(false, "pass too long"));
                     return;
                 }
 
                 Buffer.SetByte(sendBuffer, 2, (byte)count);
-                Buffer.BlockCopy(Encoding.UTF8.GetBytes(pass), 0, sendBuffer, Const.NORMAL_HEADER_SIZE, count);
+                Buffer.BlockCopy(Encoding.UTF8.GetBytes(detail.Pass), 0, sendBuffer, Const.NORMAL_HEADER_SIZE, count);
                 size = Const.NORMAL_HEADER_SIZE + count;
             }
 
             try
             {
-                Sender.BeginSendTo(sendBuffer, 0, size, SocketFlags.None, endPoint, new AsyncCallback(delegate(IAsyncResult result)
+                Sender.BeginSendTo(sendBuffer, 0, size, SocketFlags.None, detail.EndPoint, new AsyncCallback(delegate(IAsyncResult result)
                     {
                         try
                         {
                             Sender.EndSendTo(result);
-                            RemotePeer rp = AddPeer(endPoint);
-                            TryResult tr = new TryResult(true, null, null, rp.Id);
-                            callback(tr);
                         }
                         catch (SocketException se)
                         {
-                            callback(new TryResult(se));
+                            RemoveWaitingAcceptDetail(detail);
+                            detail.Callback(new TryResult(se));
                         }
                     }), null);
             }
             catch (SocketException se)
             {
-                callback(new TryResult(se));
+                RemoveWaitingAcceptDetail(detail);
+                detail.Callback(new TryResult(se));
             }
         }
 
@@ -396,11 +415,10 @@ namespace FalconUDP
                 }
             }
         }
-
-        public static List<Packet> ReadAllPackets()
+        
+        public static List<Packet> ReadReceivedPackets()
         {
             int count = 0;
-
 
             lock (peersByIp)
             {
@@ -456,12 +474,35 @@ namespace FalconUDP
         {
             if (!stop)
             {
-                lock (peersByIp) // this callback is run on some arbitary thread in the ThreadPool
+                lock (peersLockObject) // this callback is run on some arbitary thread in the ThreadPool
                 {
                     foreach (RemotePeer rp in peersByIp.Values)
                     {
                         rp.ACKTick();
                     }
+                }
+
+                lock (awaitingAcceptDetails)
+                {
+                    foreach (AwaitingAcceptDetail aad in awaitingAcceptDetails)
+                    {
+                        aad.Ticks++;
+                        if (aad.Ticks == Const.ACK_TIMEOUT_TICKS)
+                        {
+                            aad.RetryCount++;
+                            if (aad.RetryCount > Const.ACK_RETRY_ATTEMPTS)
+                            {
+                                awaitingAcceptDetailsToRemove.Add(aad);
+                                aad.Callback(new TryResult(false, String.Format("Remote peer never responded after {0} attempts.", Const.ACK_RETRY_ATTEMPTS)));
+                            }
+                        }
+                    }
+
+                    foreach (AwaitingAcceptDetail aad in awaitingAcceptDetailsToRemove)
+                    {
+                        awaitingAcceptDetails.Remove(aad);
+                    }
+                    awaitingAcceptDetailsToRemove.Clear();
                 }
             }
         }
@@ -492,10 +533,29 @@ namespace FalconUDP
                     RemotePeer rp;
                     if (!peersByIp.TryGetValue(ip, out rp))
                     {
-                        // could be the peer has not been added yet and is requesting to be added
+                        // Could be the peer has not been added yet and is requesting to be added. 
+                        // Or it could be we are asking to be added and peer is accepting!
+
                         if (sizeReceived >= Const.NORMAL_HEADER_SIZE && receiveBuffer[1] == Const.JOIN_PACKET_INFO)
                         {
                             TryAddPeer(ip, receiveBuffer, sizeReceived, out rp);
+                        }
+                        else if (sizeReceived >= Const.NORMAL_HEADER_SIZE && receiveBuffer[1] == Const.ACCEPT_PACKET_INFO)
+                        {
+                            AwaitingAcceptDetail detail;
+                            if (!TryGetAndRemoveWaitingAcceptDetail(ip, out detail))
+                            {
+                                // It is theoretically possible the Accept packet duplicated, but 
+                                // probably more likely was unsolicited.
+
+                                Log(LogLevel.Warning, String.Format("Dropped Accept Packet from unknown peer: {0}.", ip));
+                            }
+                            else
+                            {
+                                rp = AddPeer(ip);
+                                TryResult tr = new TryResult(true, null, null, rp.Id);
+                                detail.Callback(tr);
+                            }
                         }
                         else
                         {
@@ -526,16 +586,20 @@ namespace FalconUDP
 
             if (pass != networkPass) // TODO something else?
             {
-                // Send nothing - the lack of reply means failed and don't give malicious peers any
-                // clue.
                 peer = null;
-                Log(LogLevel.Info, String.Format("Join request from: {0} dropped, bad pass.", ip.ToString()));
-                return false;
+                Log(LogLevel.Info, String.Format("Join request from: {0} dropped, bad pass.", ip));
+                return false; // Send nothing - the lack of reply means failed.
+            }
+            else if (peersByIp.ContainsKey(ip))
+            {
+                peer = null;
+                Log(LogLevel.Warning, String.Format("Cannot add peer again: {0}, peer is already added!", ip));
+                return false; // Send nothing - the lack of reply means failed.
             }
             else
             {
                 peer = AddPeer(ip);
-                peer.BeginSend(SendOptions.Reliable, PacketType.Accept, null);
+                peer.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null);
                 return true;
             }
         }
@@ -572,6 +636,54 @@ namespace FalconUDP
                     peersById.Remove(rp.Id);
                     peersByIp.Remove(ip);
                 }
+            }
+        }
+
+        public static void RemovePeer(int id)
+        {
+            lock (peersLockObject) // application can use this collection e.g. SendToAll()
+            {
+                RemotePeer rp;
+                if (!peersById.TryGetValue(id, out rp))
+                {
+                    Log(LogLevel.Error, String.Format("Failed to remove peer with id: {0}, peer unknown.", id));
+                }
+                else
+                {
+                    peersById.Remove(rp.Id);
+                    peersByIp.Remove(rp.EndPoint);
+                }
+            }
+        }
+
+        private static void AddWaitingAcceptDetail(AwaitingAcceptDetail detail)
+        {
+            lock (awaitingAcceptDetails)
+            {
+                awaitingAcceptDetails.Add(detail);
+            }
+        }
+
+        private static bool TryGetAndRemoveWaitingAcceptDetail(IPEndPoint ip, out AwaitingAcceptDetail detail)
+        {
+            bool found = false;
+            lock (awaitingAcceptDetails)
+            {
+                detail = awaitingAcceptDetails.Find(aad => aad.EndPoint == ip);
+                if (detail != null)
+                {
+                    found = true;
+                    awaitingAcceptDetails.Remove(detail);
+                }
+            }
+            return found;
+        }
+
+        private static void RemoveWaitingAcceptDetail(AwaitingAcceptDetail detail)
+        {
+            lock (awaitingAcceptDetails)
+            {
+                awaitingAcceptDetails.Remove(detail);
             }
         }
 

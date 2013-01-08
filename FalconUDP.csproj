@@ -42,6 +42,7 @@
     <Compile Include="FalconUDP.cs" />
     <Compile Include="Packet.cs" />
     <Compile Include="PacketDetail.cs" />
+    <Compile Include="AwaitingAcceptDetail.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="RemotePeer.cs" />
     <Compile Include="TryResult.cs" />
