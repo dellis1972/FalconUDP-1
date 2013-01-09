@@ -41,7 +41,6 @@ namespace FalconUDP
 {
     public delegate void PeerAdded(int id);
     public delegate void PeerDropped(int id);
-    public delegate void ApplicationEvent(object tag);
     public delegate void LogCallback(string line);
 
     public enum LogLevel : byte
@@ -90,7 +89,7 @@ namespace FalconUDP
         Application = 7,
     }
 
-    static class Const
+    static class Settings
     {
         internal static int PORT;                                                               // assigned on Init()
 
@@ -111,10 +110,10 @@ namespace FalconUDP
         internal const int MAX_ACTUAL_SEQ                   = Int32.MaxValue - 1;               // Sequence number when reached to send out a re-synch request - upon ACK reset seq counters.
 
         // Packets received with calculated actual seq num outside max actual seq num received + 
-        // or - this value are dropped. To ensure calculated actual seq num is not erroneous this
-        // tolerance must be less than HALF_MAX_SEQ_NUMS.
+        // or - this value are dropped. The smaller this value the more tolerant of out-of-order
+        // we are...
 
-        internal const int OUT_OF_ORDER_TOLERANCE = HALF_MAX_SEQ_NUMS - 1;
+        internal const int OUT_OF_ORDER_TOLERANCE = HALF_MAX_SEQ_NUMS / 2;
 
         internal const byte JOIN_PACKET_INFO    = (byte)((byte)PacketType.AddPeer | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
         internal const byte ACCEPT_PACKET_INFO  = (byte)((byte)PacketType.AcceptJoin | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
@@ -126,9 +125,9 @@ namespace FalconUDP
     {
         public static event PeerAdded PeerAdded;
         public static event PeerDropped PeerDropped;
-        public static event ApplicationEvent ApplicationEvent;
 
         internal static Socket Sender;
+        internal static List<RemotePeer> RemotePeersToDrop;              // only a single ACKCheckTick() access this 
 
         private static Socket receiver;
         private static Dictionary<IPEndPoint, RemotePeer> peersByIp;    //} Collections hold refs to the same RemotePeers,
@@ -166,7 +165,7 @@ namespace FalconUDP
         /// Level at which to log at - this level and more serious levels are logged.</param>
         public static void Init(int port, string netPass, LogCallback logCallback = null, LogLevel logLevel = LogLevel.Warning)
         {
-            Const.PORT = port;
+            Settings.PORT = port;
             networkPass = netPass;
             logLvl = logLevel;
 
@@ -175,18 +174,18 @@ namespace FalconUDP
 
             Sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
 
-            anyRemoteEndPoint = new IPEndPoint(IPAddress.Any, Const.PORT);
+            RemotePeersToDrop = new List<RemotePeer>();
 
-            receiveBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
-            sendBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
+            anyRemoteEndPoint = new IPEndPoint(IPAddress.Any, Settings.PORT);
+
+            receiveBuffer = new byte[Settings.MAX_DATAGRAM_SIZE];
+            sendBuffer = new byte[Settings.MAX_DATAGRAM_SIZE];
 
             lastRemoteEndPoint = new IPEndPoint(0, 0);
 
             listenThread = new Thread(Listen);
             listenThread.Name = "Falcon ears";
             listenThread.IsBackground = true;
-
-            ackCheckTimer = new Timer(ACKCheckTick, null, Const.ACK_TICK_TIME, Const.ACK_TICK_TIME);
 
             peerIdCount = 0;
 
@@ -228,11 +227,13 @@ namespace FalconUDP
 
             receiver = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             receiver.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.PacketInformation, true); // Guarantee the remote host endpoint is always returned: http://msdn.microsoft.com/en-us/library/system.net.sockets.socket.beginreceivefrom(v=vs.100).aspx
-            receiver.Bind(anyRemoteEndPoint);
-             
+            receiver.Bind(anyRemoteEndPoint); // TODO catch possible exceptions e.g. port not avaliable, what to do when caught?
+
+            ackCheckTimer = new Timer(ACKCheckTick, null, Settings.ACK_TICK_TIME, Settings.ACK_TICK_TIME);
+
             listenThread.Start();
 
-            Log(LogLevel.Info, String.Format("Started, listening on port: {0}", Const.PORT));
+            Log(LogLevel.Info, String.Format("Started, listening on port: {0}", Settings.PORT));
         }
 
         /// <summary>
@@ -250,7 +251,7 @@ namespace FalconUDP
 
             try
             {
-                listenThread.Join(Const.JOIN_LISTEN_THREAD_TIMEOUT);
+                listenThread.Join(Settings.JOIN_LISTEN_THREAD_TIMEOUT);
             }
             catch
             {
@@ -264,6 +265,7 @@ namespace FalconUDP
             receiver = null;
             peersById.Clear();
             peersByIp.Clear();
+            ackCheckTimer.Dispose();
             // TODO should we clear events?
 
             Log(LogLevel.Info, "Stopped");
@@ -290,7 +292,7 @@ namespace FalconUDP
             else
             {
                 ManualResetEvent awaitCallback = new ManualResetEvent(false);
-                IPEndPoint endPoint = new IPEndPoint(ip, Const.PORT);
+                IPEndPoint endPoint = new IPEndPoint(ip, Settings.PORT);
                 TryResult tr = null;
                 BeginTryJoinPeer(endPoint, pass, new TryCallback(delegate(TryResult result)
                 {
@@ -325,7 +327,7 @@ namespace FalconUDP
             }
             else
             {
-                IPEndPoint endPoint = new IPEndPoint(ip, Const.PORT);
+                IPEndPoint endPoint = new IPEndPoint(ip, Settings.PORT);
                 BeginTryJoinPeer(endPoint, pass, callback);
             }
         }
@@ -338,54 +340,56 @@ namespace FalconUDP
             BeginTryJoinPeer(detail);
         }
 
-        // called directly when re-sending an AwaitingAcceptDetail already instantiated and in list
+        // Called directly when re-sending an AwaitingAcceptDetail already instantiated and in list
+        // or via API on intial attempt after creating AwaitingAcceptDetail.
         private static void BeginTryJoinPeer(AwaitingAcceptDetail detail)
         {
-            // TODO what if called on another thread - may be best to dispatch access to sendBuffer on same thread
-
-            Buffer.SetByte(sendBuffer, 0, 0);
-            Buffer.SetByte(sendBuffer, 1, Const.JOIN_PACKET_INFO);
-
-            int size = 0;
-            if (detail.Pass == null)
+            lock (sendBuffer) // we could be being called from Timer or application
             {
-                Buffer.SetByte(sendBuffer, 2, 0);
-                size = Const.NORMAL_HEADER_SIZE;
-            }
-            else
-            {
-                int count = Encoding.UTF8.GetByteCount(detail.Pass);
-                if (count > Byte.MaxValue)
+                Buffer.SetByte(sendBuffer, 0, 0);
+                Buffer.SetByte(sendBuffer, 1, Settings.JOIN_PACKET_INFO);
+
+                int size = 0;
+                if (detail.Pass == null)
                 {
-                    RemoveWaitingAcceptDetail(detail);
-                    detail.Callback(new TryResult(false, "pass too long"));
-                    return;
+                    Buffer.SetByte(sendBuffer, 2, 0);
+                    size = Settings.NORMAL_HEADER_SIZE;
+                }
+                else
+                {
+                    int count = Encoding.UTF8.GetByteCount(detail.Pass);
+                    if (count > Byte.MaxValue)
+                    {
+                        RemoveWaitingAcceptDetail(detail);
+                        detail.Callback(new TryResult(false, "pass too long"));
+                        return;
+                    }
+
+                    Buffer.SetByte(sendBuffer, 2, (byte)count);
+                    Buffer.BlockCopy(Encoding.UTF8.GetBytes(detail.Pass), 0, sendBuffer, Settings.NORMAL_HEADER_SIZE, count);
+                    size = Settings.NORMAL_HEADER_SIZE + count;
                 }
 
-                Buffer.SetByte(sendBuffer, 2, (byte)count);
-                Buffer.BlockCopy(Encoding.UTF8.GetBytes(detail.Pass), 0, sendBuffer, Const.NORMAL_HEADER_SIZE, count);
-                size = Const.NORMAL_HEADER_SIZE + count;
-            }
-
-            try
-            {
-                Sender.BeginSendTo(sendBuffer, 0, size, SocketFlags.None, detail.EndPoint, new AsyncCallback(delegate(IAsyncResult result)
-                    {
-                        try
+                try
+                {
+                    Sender.BeginSendTo(sendBuffer, 0, size, SocketFlags.None, detail.EndPoint, new AsyncCallback(delegate(IAsyncResult result)
                         {
-                            Sender.EndSendTo(result);
-                        }
-                        catch (SocketException se)
-                        {
-                            RemoveWaitingAcceptDetail(detail);
-                            detail.Callback(new TryResult(se));
-                        }
-                    }), null);
-            }
-            catch (SocketException se)
-            {
-                RemoveWaitingAcceptDetail(detail);
-                detail.Callback(new TryResult(se));
+                            try
+                            {
+                                Sender.EndSendTo(result);
+                            }
+                            catch (SocketException se)
+                            {
+                                RemoveWaitingAcceptDetail(detail);
+                                detail.Callback(new TryResult(se));
+                            }
+                        }), null);
+                }
+                catch (SocketException se)
+                {
+                    RemoveWaitingAcceptDetail(detail);
+                    detail.Callback(new TryResult(se));
+                }
             }
         }
 
@@ -472,13 +476,24 @@ namespace FalconUDP
 
         private static void ACKCheckTick(object dummy)
         {
+            // NOTE: This callback is run on some arbitary thread in the ThreadPool.
+
             if (!stop)
             {
-                lock (peersLockObject) // this callback is run on some arbitary thread in the ThreadPool
+                lock (peersLockObject) 
                 {
                     foreach (RemotePeer rp in peersByIp.Values)
                     {
                         rp.ACKTick();
+                    }
+
+                    if (RemotePeersToDrop.Count > 0)
+                    {
+                        foreach (RemotePeer rp in RemotePeersToDrop)
+                        {
+                            RemovePeer(rp.Id);
+                        }
+                        RemotePeersToDrop.Clear();
                     }
                 }
 
@@ -487,22 +502,26 @@ namespace FalconUDP
                     foreach (AwaitingAcceptDetail aad in awaitingAcceptDetails)
                     {
                         aad.Ticks++;
-                        if (aad.Ticks == Const.ACK_TIMEOUT_TICKS)
+                        if (aad.Ticks == Settings.ACK_TIMEOUT_TICKS)
                         {
                             aad.RetryCount++;
-                            if (aad.RetryCount > Const.ACK_RETRY_ATTEMPTS)
+                            if (aad.RetryCount > Settings.ACK_RETRY_ATTEMPTS)
                             {
+                                // give up, peer has not been added yet so no need to drop
                                 awaitingAcceptDetailsToRemove.Add(aad);
-                                aad.Callback(new TryResult(false, String.Format("Remote peer never responded after {0} attempts.", Const.ACK_RETRY_ATTEMPTS)));
+                                aad.Callback(new TryResult(false, String.Format("Remote peer never responded after {0} join attempts.", Settings.ACK_RETRY_ATTEMPTS)));
                             }
                         }
                     }
 
-                    foreach (AwaitingAcceptDetail aad in awaitingAcceptDetailsToRemove)
+                    if (awaitingAcceptDetailsToRemove.Count > 0)
                     {
-                        awaitingAcceptDetails.Remove(aad);
+                        foreach (AwaitingAcceptDetail aad in awaitingAcceptDetailsToRemove)
+                        {
+                            awaitingAcceptDetails.Remove(aad);
+                        }
+                        awaitingAcceptDetailsToRemove.Clear();
                     }
-                    awaitingAcceptDetailsToRemove.Clear();
                 }
             }
         }
@@ -536,11 +555,11 @@ namespace FalconUDP
                         // Could be the peer has not been added yet and is requesting to be added. 
                         // Or it could be we are asking to be added and peer is accepting!
 
-                        if (sizeReceived >= Const.NORMAL_HEADER_SIZE && receiveBuffer[1] == Const.JOIN_PACKET_INFO)
+                        if (sizeReceived >= Settings.NORMAL_HEADER_SIZE && receiveBuffer[1] == Settings.JOIN_PACKET_INFO)
                         {
                             TryAddPeer(ip, receiveBuffer, sizeReceived, out rp);
                         }
-                        else if (sizeReceived >= Const.NORMAL_HEADER_SIZE && receiveBuffer[1] == Const.ACCEPT_PACKET_INFO)
+                        else if (sizeReceived >= Settings.NORMAL_HEADER_SIZE && receiveBuffer[1] == Settings.ACCEPT_PACKET_INFO)
                         {
                             AwaitingAcceptDetail detail;
                             if (!TryGetAndRemoveWaitingAcceptDetail(ip, out detail))
@@ -569,7 +588,7 @@ namespace FalconUDP
                 }
                 catch (SocketException se)
                 {
-                    // TODO handel exception based on error code.
+                    // TODO http://msdn.microsoft.com/en-us/library/ms740668.aspx
                     Log(LogLevel.Error, String.Format("EndReceiveFrom() SocketException: {0}.", se.Message));
                 }
             }
@@ -582,7 +601,7 @@ namespace FalconUDP
             string pass = null;
             byte payloadSize = receiveBuffer[2];
             if (payloadSize > 0)
-                pass = BitConverter.ToString(receiveBuffer, Const.NORMAL_HEADER_SIZE, payloadSize);
+                pass = BitConverter.ToString(receiveBuffer, Settings.NORMAL_HEADER_SIZE, payloadSize);
 
             if (pass != networkPass) // TODO something else?
             {
@@ -622,11 +641,11 @@ namespace FalconUDP
             }
         }
 
-        internal static void RemovePeer(IPEndPoint ip)
+        private static void RemovePeer(IPEndPoint ip)
         {
+            RemotePeer rp;
             lock (peersLockObject) // application can use this collection e.g. SendToAll()
             {
-                RemotePeer rp;
                 if (!peersByIp.TryGetValue(ip, out rp))
                 {
                     Log(LogLevel.Error, String.Format("Failed to remove peer: {0}, peer unknown.", ip));
@@ -637,13 +656,18 @@ namespace FalconUDP
                     peersByIp.Remove(ip);
                 }
             }
-        }
 
+            // raise the PeerDropped event notifying any listners
+            if (rp != null)
+                if (PeerDropped != null)
+                    PeerDropped(rp.Id);
+        }
+        
         public static void RemovePeer(int id)
         {
+            RemotePeer rp;
             lock (peersLockObject) // application can use this collection e.g. SendToAll()
             {
-                RemotePeer rp;
                 if (!peersById.TryGetValue(id, out rp))
                 {
                     Log(LogLevel.Error, String.Format("Failed to remove peer with id: {0}, peer unknown.", id));
@@ -654,6 +678,11 @@ namespace FalconUDP
                     peersByIp.Remove(rp.EndPoint);
                 }
             }
+
+            // raise the PeerDropped event notifying any listners
+            if(rp != null)
+                if (PeerDropped != null)
+                    PeerDropped(id);
         }
 
         private static void AddWaitingAcceptDetail(AwaitingAcceptDetail detail)
@@ -686,7 +715,7 @@ namespace FalconUDP
                 awaitingAcceptDetails.Remove(detail);
             }
         }
-
+        
         internal static void Log(LogLevel lvl, string msg)
         {
             if (lvl >= logLvl)
