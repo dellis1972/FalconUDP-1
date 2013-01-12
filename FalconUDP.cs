@@ -43,85 +43,7 @@ namespace FalconUDP
     public delegate void PeerDropped(int id);
     public delegate void LogCallback(string line);
 
-    public enum LogLevel : byte
-    {
-        All,        // must be first in list
-        Info,
-        Warning,
-        Error,
-        Fatal,
-        NoLogging   // must be last in list
-    }
-
-    //
-    // send options (bits 3 and 4 of packet info byte in header)
-    //
-    [Flags]
-    public enum SendOptions : byte
-    {
-        None            = 0,    // 0000 0000
-        Reliable        = 16,   // 0001 0000
-        InOrder         = 32,   // 0010 0000
-        ReliableInOrder = 48    // 0011 0000
-    }
-
-    //
-    // bits 1 and 2 of packet info byte in header
-    //
-    enum HeaderPayloadSizeType : byte
-    {
-        Byte    = 64,   // 0100 0000
-        UInt16  = 128,  // 1000 0000
-    }
-
-    //
-    // packet type (last 4 bits of packet info byte in header)
-    //
-    public enum PacketType : byte
-    {
-        ACK         = 0,
-        AntiACK     = 1,
-        AddPeer     = 2,
-        DropPeer    = 3,
-        AcceptJoin  = 4,
-        Resynch     = 5,
-        Ping        = 6,
-        Application = 7,
-    }
-
-    static class Settings
-    {
-        internal static int PORT;                                                               // assigned on Init()
-
-        internal const int NORMAL_HEADER_SIZE               = 3;                                // in bytes
-        internal const int LARGE_HEADER_SIZE                = 4;                                // in bytes (used when payload size > Byte.MaxValue)
-        internal const int JOIN_LISTEN_THREAD_TIMEOUT       = 500;                              // milliseconds
-        internal const int MAX_DATAGRAM_SIZE                = 65507;                            // this is an IPv4 limit, v6 allows slightly more but we needn't
-        internal const byte MAX_SEQ                         = Byte.MaxValue;
-        internal const int MAX_SEQ_NUMS                     = MAX_SEQ + 1;                      // + 1 to include "0"
-        internal const int HALF_MAX_SEQ_NUMS                = MAX_SEQ_NUMS / 2;
-        internal const int ACK_TIMEOUT                      = 600;                              // milliseconds (should be multiple of ACK_TICK_TIME)
-        internal const int ACK_TICK_TIME                    = 100;                              // milliseconds (note timer could tick just as packet sent so this also defines the error margin)
-        internal const int ACK_TIMEOUT_TICKS                = ACK_TIMEOUT / ACK_TICK_TIME;      // timeout in ticks 
-        internal const int ACK_RETRY_ATTEMPTS               = 3;                                // number of times to retry until assuming peer is dead (used by AwaitingAcceptDetail too)
-        internal const byte PAYLOAD_SIZE_TYPE_MASK          = 192;                              // 1100 0000 AND'd with packet info byte returns PayloadSizeHeaderType
-        internal const byte SEND_OPTS_MASK                  = 48;                               // 0011 0000 AND'd with packet info byte returns SendOptions
-        internal const byte PACKET_TYPE_MASK                = 15;                               // 0000 1111 AND'd with packet info byte returns PacketType
-        internal const int MAX_ACTUAL_SEQ                   = Int32.MaxValue - 1;               // Sequence number when reached to send out a re-synch request - upon ACK reset seq counters.
-
-        // Packets received with calculated actual seq num outside max actual seq num received + 
-        // or - this value are dropped. The smaller this value the more tolerant of out-of-order
-        // we are...
-
-        internal const int OUT_OF_ORDER_TOLERANCE = HALF_MAX_SEQ_NUMS / 2;
-
-        internal const byte JOIN_PACKET_INFO    = (byte)((byte)PacketType.AddPeer | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
-        internal const byte ACCEPT_PACKET_INFO  = (byte)((byte)PacketType.AcceptJoin | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
-        internal const byte PING_PACKET_INFO    = (byte)((byte)PacketType.Ping | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
-
-    }
-
-    public static class Falcon
+    public static partial class Falcon
     {
         public static event PeerAdded PeerAdded;
         public static event PeerDropped PeerDropped;
@@ -357,7 +279,7 @@ namespace FalconUDP
                 }
                 else
                 {
-                    int count = Encoding.UTF8.GetByteCount(detail.Pass);
+                    int count = Settings.TEXT_ENCODING.GetByteCount(detail.Pass);
                     if (count > Byte.MaxValue)
                     {
                         RemoveWaitingAcceptDetail(detail);
@@ -366,7 +288,7 @@ namespace FalconUDP
                     }
 
                     Buffer.SetByte(sendBuffer, 2, (byte)count);
-                    Buffer.BlockCopy(Encoding.UTF8.GetBytes(detail.Pass), 0, sendBuffer, Settings.NORMAL_HEADER_SIZE, count);
+                    Buffer.BlockCopy(Settings.TEXT_ENCODING.GetBytes(detail.Pass), 0, sendBuffer, Settings.NORMAL_HEADER_SIZE, count);
                     size = Settings.NORMAL_HEADER_SIZE + count;
                 }
 
@@ -380,7 +302,13 @@ namespace FalconUDP
                             }
                             catch (SocketException se)
                             {
-                                RemoveWaitingAcceptDetail(detail);
+                                // We, quite likely, are on a different thread to the caller, not 
+                                // of this anonoymous method - but of BeginTryJoin() call, and this 
+                                // caller, quite likely, has locked awaitingAcceptDetails e.g. in 
+                                // ACKCheckTick() when re-sending, so don't try re-acquire lock 
+                                // here.
+
+                                awaitingAcceptDetailsToRemove.Add(detail); 
                                 detail.Callback(new TryResult(se));
                             }
                         }), null);
@@ -504,12 +432,18 @@ namespace FalconUDP
                         aad.Ticks++;
                         if (aad.Ticks == Settings.ACK_TIMEOUT_TICKS)
                         {
+                            aad.Ticks = 0;
                             aad.RetryCount++;
-                            if (aad.RetryCount > Settings.ACK_RETRY_ATTEMPTS)
+                            if (aad.RetryCount == 1) // TODO review
                             {
                                 // give up, peer has not been added yet so no need to drop
                                 awaitingAcceptDetailsToRemove.Add(aad);
-                                aad.Callback(new TryResult(false, String.Format("Remote peer never responded after {0} join attempts.", Settings.ACK_RETRY_ATTEMPTS)));
+                                aad.Callback(new TryResult(false, String.Format("Remote peer never responded join request.")));
+                            }
+                            else
+                            {
+                                // try again
+                                BeginTryJoinPeer(aad);
                             }
                         }
                     }
@@ -526,74 +460,6 @@ namespace FalconUDP
             }
         }
 
-        private static void Listen()
-        {
-            while (true)
-            {
-                if (stop)
-                    return;
-
-                int sizeReceived = 0;
-
-                try
-                {
-                    //-------------------------------------------------------------------------
-                    sizeReceived = receiver.ReceiveFrom(receiveBuffer, ref lastRemoteEndPoint);
-                    //-------------------------------------------------------------------------
-
-                    if (sizeReceived == 0)
-                    {
-                        // EOF - socket must be closing
-                        return;
-                    }
-
-                    IPEndPoint ip = (IPEndPoint)lastRemoteEndPoint;
-
-                    RemotePeer rp;
-                    if (!peersByIp.TryGetValue(ip, out rp))
-                    {
-                        // Could be the peer has not been added yet and is requesting to be added. 
-                        // Or it could be we are asking to be added and peer is accepting!
-
-                        if (sizeReceived >= Settings.NORMAL_HEADER_SIZE && receiveBuffer[1] == Settings.JOIN_PACKET_INFO)
-                        {
-                            TryAddPeer(ip, receiveBuffer, sizeReceived, out rp);
-                        }
-                        else if (sizeReceived >= Settings.NORMAL_HEADER_SIZE && receiveBuffer[1] == Settings.ACCEPT_PACKET_INFO)
-                        {
-                            AwaitingAcceptDetail detail;
-                            if (!TryGetAndRemoveWaitingAcceptDetail(ip, out detail))
-                            {
-                                // It is theoretically possible the Accept packet duplicated, but 
-                                // probably more likely was unsolicited.
-
-                                Log(LogLevel.Warning, String.Format("Dropped Accept Packet from unknown peer: {0}.", ip));
-                            }
-                            else
-                            {
-                                rp = AddPeer(ip);
-                                TryResult tr = new TryResult(true, null, null, rp.Id);
-                                detail.Callback(tr);
-                            }
-                        }
-                        else
-                        {
-                            Log(LogLevel.Warning, String.Format("Datagram dropped - unknown peer: {0}.", ip.Address.ToString()));
-                        }
-                    }
-                    else
-                    {
-                        rp.AddReceivedDatagram(sizeReceived, receiveBuffer);
-                    }
-                }
-                catch (SocketException se)
-                {
-                    // TODO http://msdn.microsoft.com/en-us/library/ms740668.aspx
-                    Log(LogLevel.Error, String.Format("EndReceiveFrom() SocketException: {0}.", se.Message));
-                }
-            }
-        }
-
         private static bool TryAddPeer(IPEndPoint ip, byte[] buffer, int sizeOfPacket, out RemotePeer peer)
         {
             // ASSUMPTION: Caller has checked peer is indeed requesting to be added!
@@ -601,19 +467,19 @@ namespace FalconUDP
             string pass = null;
             byte payloadSize = receiveBuffer[2];
             if (payloadSize > 0)
-                pass = BitConverter.ToString(receiveBuffer, Settings.NORMAL_HEADER_SIZE, payloadSize);
+                pass = Settings.TEXT_ENCODING.GetString(receiveBuffer, Settings.NORMAL_HEADER_SIZE, payloadSize);
 
             if (pass != networkPass) // TODO something else?
             {
                 peer = null;
                 Log(LogLevel.Info, String.Format("Join request from: {0} dropped, bad pass.", ip));
-                return false; // Send nothing - the lack of reply means failed.
+                return false; // TODO should we send something?
             }
             else if (peersByIp.ContainsKey(ip))
             {
                 peer = null;
                 Log(LogLevel.Warning, String.Format("Cannot add peer again: {0}, peer is already added!", ip));
-                return false; // Send nothing - the lack of reply means failed.
+                return false; // TODO should we send something?
             }
             else
             {

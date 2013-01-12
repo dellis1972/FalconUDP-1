@@ -26,7 +26,7 @@ namespace FalconUDP
         private int sendPacketSize;                             // the size of the current packet to be sent in SendBuffer
         private string peerName;                                // e.g. IP address, used internally for logging
         private bool isResynching;
-        private List<byte[]> backlog;                     // filled with raw packets when pauseSending set.
+        private List<byte[]> backlog;                           // filled with raw packets when isResynching
         private bool isClearingBacklog;
         private bool hasResynchedAndHasPacketsPreSynch;
         private byte[] payloadSizeBytes = new byte[2];          // buffer recycled for headers with payload size as ushort 
@@ -63,6 +63,7 @@ namespace FalconUDP
                     kv.Value.ACKTicks++;
                     if (kv.Value.ACKTicks == Settings.ACK_TIMEOUT_TICKS)
                     {
+                        kv.Value.ACKTicks = 0;
                         kv.Value.ResentCount++;
                         if (kv.Value.ResentCount == Settings.ACK_RETRY_ATTEMPTS)
                         {
@@ -172,6 +173,9 @@ namespace FalconUDP
             }
             else 
             {
+                // It seems unfortunate we have to obtain a lock on backlog for what will only be 
+                // neccessary after every 2 147 483 646 packets received! TODO
+
                 lock (backlog)
                 {
                     if (backlog.Count > 0 && !isClearingBacklog)
@@ -297,6 +301,15 @@ namespace FalconUDP
             SendOptions opts = (SendOptions)(receiveBuffer[1] & Settings.SEND_OPTS_MASK);
             PacketType type = (PacketType)(receiveBuffer[1] & Settings.PACKET_TYPE_MASK);
 
+            // check the header makes sense
+            if (!Enum.IsDefined(Const.HeaderPayloadSizeTypeType, hpst)
+                || !Enum.IsDefined(Const.SendOptionsType, opts)
+                || !Enum.IsDefined(Const.PacketTypeType, type))
+            {
+                Falcon.Log(LogLevel.Warning, String.Format("Dropped packet from peer: {0}, bad header.", peerName));
+                return;
+            }
+
             // parse payload size
             int payloadSize, payloadStartIndex;
             if (hpst == HeaderPayloadSizeType.Byte)
@@ -399,6 +412,11 @@ namespace FalconUDP
                                         PacketCount++;
                                     }
                                 }
+                            }
+                            break;
+                        case PacketType.AcceptJoin:
+                            {
+                                // nothing else to do..
                             }
                             break;
                         case PacketType.Resynch:
