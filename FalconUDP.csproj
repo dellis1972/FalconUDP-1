@@ -40,9 +40,10 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Const.cs" />
+    <Compile Include="Delegates.cs" />
     <Compile Include="Enums.cs" />
     <Compile Include="FalconListen.cs" />
-    <Compile Include="FalconUDP.cs" />
+    <Compile Include="FalconPeer.cs" />
     <Compile Include="Packet.cs" />
     <Compile Include="PacketDetail.cs" />
     <Compile Include="AwaitingAcceptDetail.cs" />

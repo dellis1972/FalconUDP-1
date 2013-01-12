@@ -6,7 +6,9 @@ using System.Threading.Tasks;
 
 namespace FalconUDP
 {
-
+    /// <summary>
+    /// 
+    /// </summary>
     public enum LogLevel : byte
     {
         All,        // must be first in list
@@ -17,9 +19,9 @@ namespace FalconUDP
         NoLogging   // must be last in list
     }
 
-    //
-    // send options (bits 3 and 4 of packet info byte in header)
-    //
+    /// <summary>
+    /// TODO
+    /// </summary>
     [Flags]
     public enum SendOptions : byte
     {
@@ -43,14 +45,16 @@ namespace FalconUDP
     //
     enum PacketType : byte
     {
-        ACK             = 0,
-        AntiACK         = 1,
-        AddPeer         = 2,
-        DropPeer        = 3,
-        AcceptJoin      = 4,
-        Resynch         = 5,
-        Ping            = 6,
-        Application     = 7,
+        ACK,
+        AntiACK,
+        AddPeer,
+        DropPeer,
+        AcceptJoin,
+        RejectJoin,
+        Resynch,
+        Ping,
+        Pong,
+        Application,
     }
     
 }

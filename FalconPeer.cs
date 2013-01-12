@@ -39,86 +39,77 @@ using System.Threading;
 
 namespace FalconUDP
 {
-    public delegate void PeerAdded(int id);
-    public delegate void PeerDropped(int id);
-    public delegate void LogCallback(string line);
-
-    public static partial class Falcon
+    public partial class FalconPeer
     {
-        public static event PeerAdded PeerAdded;
-        public static event PeerDropped PeerDropped;
+        public event PeerAdded PeerAdded;
+        public event PeerDropped PeerDropped;
 
-        internal static Socket Sender;
-        internal static List<RemotePeer> RemotePeersToDrop;              // only a single ACKCheckTick() access this 
+        internal Socket Sender;
+        internal List<RemotePeer> RemotePeersToDrop;            // only ACKCheckTick() uses this 
 
-        private static Socket receiver;
-        private static Dictionary<IPEndPoint, RemotePeer> peersByIp;    //} Collections hold refs to the same RemotePeers,
-        private static Dictionary<int, RemotePeer> peersById;           //} just offer different ways to look them up
-        private static object peersLockObject;                          // used to lock when using above peer collections
-        private static EndPoint anyRemoteEndPoint;                      // end point to listen on
-        private static EndPoint lastRemoteEndPoint;                     // end point data last received from
-        private static byte[] receiveBuffer;
-        private static byte[] sendBuffer;
-        private static Thread listenThread;
-        private static bool stop;
-        private static string networkPass;
-        private static Timer ackCheckTimer;                             // also used for AwaitingAcceptDetail
-        private static bool initialized;
-        private static LogLevel logLvl;
-        private static int peerIdCount;
-        private static byte[] payloadSizeBytes;
-        private static LogCallback logger;
-        private static List<AwaitingAcceptDetail> awaitingAcceptDetails;
-        private static List<AwaitingAcceptDetail> awaitingAcceptDetailsToRemove;
-
-        static Falcon()
-        {
-            // do nothing
-        }
+        private Socket receiver;
+        private int port;
+        private Dictionary<IPEndPoint, RemotePeer> peersByIp;   //} Collections hold refs to the same RemotePeers,
+        private Dictionary<int, RemotePeer> peersById;          //} just offer different ways to look them up
+        private object peersLockObject;                         // used to lock when using above peer collections
+        private EndPoint anyRemoteEndPoint;                     // end point to listen on
+        private EndPoint lastRemoteEndPoint;                    // end point data last received from
+        private byte[] receiveBuffer;
+        private byte[] sendBuffer;
+        private Thread listenThread;
+        private bool stop;
+        private string networkPass;
+        private Timer ackCheckTimer;                            // also used for AwaitingAcceptDetail
+        private LogLevel logLvl; 
+        private int peerIdCount;
+        private byte[] payloadSizeBytes;                        // buffer to store payload size in large headers
+        private LogCallback logger;
+        private List<AwaitingAcceptDetail> awaitingAcceptDetails;
+        private List<AwaitingAcceptDetail> awaitingAcceptDetailsToRemove;
 
         /// <summary>
-        /// Initialize Falcon</summary>
+        /// Creates a local FalconPeer</summary>
         /// <param name="port">
         /// Port number to listen and send on.</param>
         /// <param name="netPass">
         /// Password remote peers must supply when requesting to join Falcon - neccessary to send
         /// and receive from peer.</param>
+        /// <param name="logCallback">
+        /// Callback to invoke supplying log message, if null log messages are written to Debug.</param>
         /// <param name="logLevel">
         /// Level at which to log at - this level and more serious levels are logged.</param>
-        public static void Init(int port, string netPass, LogCallback logCallback = null, LogLevel logLevel = LogLevel.Warning)
+        public FalconPeer(int port, string netPass, LogCallback logCallback = null, LogLevel logLevel = LogLevel.Warning)
         {
-            Settings.PORT = port;
-            networkPass = netPass;
-            logLvl = logLevel;
+            this.port = port;
+            this.networkPass = netPass;
+            this.logLvl = logLevel;
 
-            peersByIp = new Dictionary<IPEndPoint, RemotePeer>();
-            peersById = new Dictionary<int, RemotePeer>();
+            this.peersByIp = new Dictionary<IPEndPoint, RemotePeer>();
+            this.peersById = new Dictionary<int, RemotePeer>();
 
-            Sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            this.Sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
 
-            RemotePeersToDrop = new List<RemotePeer>();
+            this.RemotePeersToDrop = new List<RemotePeer>();
 
-            anyRemoteEndPoint = new IPEndPoint(IPAddress.Any, Settings.PORT);
+            this.anyRemoteEndPoint = new IPEndPoint(IPAddress.Any, this.port);
 
-            receiveBuffer = new byte[Settings.MAX_DATAGRAM_SIZE];
-            sendBuffer = new byte[Settings.MAX_DATAGRAM_SIZE];
+            this.receiveBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
+            this.sendBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
 
-            lastRemoteEndPoint = new IPEndPoint(0, 0);
+            this.lastRemoteEndPoint = new IPEndPoint(0, 0);
 
-            listenThread = new Thread(Listen);
-            listenThread.Name = "Falcon ears";
-            listenThread.IsBackground = true;
+            this.listenThread = new Thread(Listen);
+            this.listenThread.Name = "Falcon ears";
+            this.listenThread.IsBackground = true;
 
-            peerIdCount = 0;
+            this.peerIdCount = 0;
 
-            peersLockObject = new object();
+            this.peersLockObject = new object();
 
-            awaitingAcceptDetails = new List<AwaitingAcceptDetail>();
-            awaitingAcceptDetailsToRemove = new List<AwaitingAcceptDetail>();
+            this.awaitingAcceptDetails = new List<AwaitingAcceptDetail>();
+            this.awaitingAcceptDetailsToRemove = new List<AwaitingAcceptDetail>();
 
-            payloadSizeBytes = new byte[2];
-
-            initialized = true;
+            this.payloadSizeBytes = new byte[2];
 
             if (logLevel != LogLevel.NoLogging)
             {
@@ -137,11 +128,8 @@ namespace FalconUDP
 
         /// <summary>
         /// Start her up!</summary>
-        public static void Start()
+        public TryResult TryStart()
         {
-            if (!initialized)
-                throw new InvalidOperationException("Not initalized - must have called Init() first.");
-
             stop = false;
 
             // Create a new socket to listen on when starting as only way to stop blocking 
@@ -149,19 +137,38 @@ namespace FalconUDP
 
             receiver = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             receiver.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.PacketInformation, true); // Guarantee the remote host endpoint is always returned: http://msdn.microsoft.com/en-us/library/system.net.sockets.socket.beginreceivefrom(v=vs.100).aspx
-            receiver.Bind(anyRemoteEndPoint); // TODO catch possible exceptions e.g. port not avaliable, what to do when caught?
 
-            ackCheckTimer = new Timer(ACKCheckTick, null, Settings.ACK_TICK_TIME, Settings.ACK_TICK_TIME);
+            try
+            {
+                receiver.Bind(anyRemoteEndPoint);
+            }
+            catch (SocketException se)
+            {
+                // e.g. address already in use
+                return new TryResult(se);
+            }
 
-            listenThread.Start();
+            ackCheckTimer = new Timer(ACKCheckTick, null, Settings.ACKTickTime, Settings.ACKTickTime);
 
-            Log(LogLevel.Info, String.Format("Started, listening on port: {0}", Settings.PORT));
+            try
+            {
+                listenThread.Start();
+            }
+            catch (ThreadStateException tse)
+            {
+                // e.g. user application called start when already started!
+                return new TryResult(tse);
+            }
+
+            Log(LogLevel.Info, String.Format("Started, listening on port: {0}", this.port));
+
+            return TryResult.SuccessResult;
         }
 
         /// <summary>
         /// Stops Falcon, will stop listening and be unable send. Connected remote peers will be 
         /// lost. To start Falcon again call Start() again.</summary>
-        public static void Stop()
+        public void Stop()
         {
             stop = true;
 
@@ -173,7 +180,7 @@ namespace FalconUDP
 
             try
             {
-                listenThread.Join(Settings.JOIN_LISTEN_THREAD_TIMEOUT);
+                listenThread.Join(Settings.JoinListenThreadTimeout);
             }
             catch
             {
@@ -204,7 +211,7 @@ namespace FalconUDP
         /// TryResult either success, or failed with message or exception containing fail reason.</returns>
         /// <remarks>
         /// This Method uses BeginTryJoinPeer() and blocks until callback is called.</remarks>
-        public static TryResult TryJoinPeer(string addr, string pass = null)
+        public TryResult TryJoinPeer(string addr, string pass = null)
         {
             IPAddress ip;
             if (!IPAddress.TryParse(addr, out ip))
@@ -214,7 +221,7 @@ namespace FalconUDP
             else
             {
                 ManualResetEvent awaitCallback = new ManualResetEvent(false);
-                IPEndPoint endPoint = new IPEndPoint(ip, Settings.PORT);
+                IPEndPoint endPoint = new IPEndPoint(ip, this.port);
                 TryResult tr = null;
                 BeginTryJoinPeer(endPoint, pass, new TryCallback(delegate(TryResult result)
                 {
@@ -237,7 +244,7 @@ namespace FalconUDP
         /// Callback to call when operation completes.</param>
         /// <param name="pass">
         /// Password remote peer requires, if any.</param>
-        public static void BeginTryJoinPeer(string addr, TryCallback callback, string pass = null)
+        public void BeginTryJoinPeer(string addr, TryCallback callback, string pass = null)
         {
             if (stop)
                 callback(new TryResult(false, "Falcon is not started!"));
@@ -249,13 +256,13 @@ namespace FalconUDP
             }
             else
             {
-                IPEndPoint endPoint = new IPEndPoint(ip, Settings.PORT);
+                IPEndPoint endPoint = new IPEndPoint(ip, this.port);
                 BeginTryJoinPeer(endPoint, pass, callback);
             }
         }
 
         // called on first attempt
-        private static void BeginTryJoinPeer(IPEndPoint endPoint, string pass, TryCallback callback)
+        private void BeginTryJoinPeer(IPEndPoint endPoint, string pass, TryCallback callback)
         {
             AwaitingAcceptDetail detail = new AwaitingAcceptDetail(endPoint, callback, pass);
             AddWaitingAcceptDetail(detail);
@@ -264,22 +271,22 @@ namespace FalconUDP
 
         // Called directly when re-sending an AwaitingAcceptDetail already instantiated and in list
         // or via API on intial attempt after creating AwaitingAcceptDetail.
-        private static void BeginTryJoinPeer(AwaitingAcceptDetail detail)
+        private void BeginTryJoinPeer(AwaitingAcceptDetail detail)
         {
             lock (sendBuffer) // we could be being called from Timer or application
             {
                 Buffer.SetByte(sendBuffer, 0, 0);
-                Buffer.SetByte(sendBuffer, 1, Settings.JOIN_PACKET_INFO);
+                Buffer.SetByte(sendBuffer, 1, Const.JOIN_PACKET_INFO);
 
                 int size = 0;
                 if (detail.Pass == null)
                 {
                     Buffer.SetByte(sendBuffer, 2, 0);
-                    size = Settings.NORMAL_HEADER_SIZE;
+                    size = Const.NORMAL_HEADER_SIZE;
                 }
                 else
                 {
-                    int count = Settings.TEXT_ENCODING.GetByteCount(detail.Pass);
+                    int count = Settings.TextEncoding.GetByteCount(detail.Pass);
                     if (count > Byte.MaxValue)
                     {
                         RemoveWaitingAcceptDetail(detail);
@@ -288,25 +295,27 @@ namespace FalconUDP
                     }
 
                     Buffer.SetByte(sendBuffer, 2, (byte)count);
-                    Buffer.BlockCopy(Settings.TEXT_ENCODING.GetBytes(detail.Pass), 0, sendBuffer, Settings.NORMAL_HEADER_SIZE, count);
-                    size = Settings.NORMAL_HEADER_SIZE + count;
+                    Buffer.BlockCopy(Settings.TextEncoding.GetBytes(detail.Pass), 0, sendBuffer, Const.NORMAL_HEADER_SIZE, count);
+                    size = Const.NORMAL_HEADER_SIZE + count;
                 }
 
                 try
                 {
                     Sender.BeginSendTo(sendBuffer, 0, size, SocketFlags.None, detail.EndPoint, new AsyncCallback(delegate(IAsyncResult result)
                         {
+                            // NOTE: lock on sendBuffer is lost if completed asynchoronously
+
                             try
                             {
                                 Sender.EndSendTo(result);
                             }
                             catch (SocketException se)
                             {
-                                // We, quite likely, are on a different thread to the caller, not 
-                                // of this anonoymous method - but of BeginTryJoin() call, and this 
-                                // caller, quite likely, has locked awaitingAcceptDetails e.g. in 
+                                // We, quite likely, are on a different thread to the caller of 
+                                // BeginTryJoin() call in this anonymous method, and the caller, 
+                                // quite likely, has locked awaitingAcceptDetails e.g. in 
                                 // ACKCheckTick() when re-sending, so don't try re-acquire lock 
-                                // here.
+                                // here - that would be a dead lock!
 
                                 awaitingAcceptDetailsToRemove.Add(detail); 
                                 detail.Callback(new TryResult(se));
@@ -321,8 +330,13 @@ namespace FalconUDP
             }
         }
 
-        // external use only! ALWAYS uses PacketType: Application
-        public static void BeginSendTo(int id, SendOptions opts, byte[] data)
+        /// <summary>
+        /// TODO
+        /// </summary>
+        /// <param name="id"></param>
+        /// <param name="opts"></param>
+        /// <param name="data"></param>
+        public void BeginSendTo(int id, SendOptions opts, byte[] data)
         {
             RemotePeer rp;
             if (!peersById.TryGetValue(id, out rp))
@@ -336,8 +350,12 @@ namespace FalconUDP
             }
         }
 
-        // external use only! ALWAYS uses PacketType: Application
-        public static void BeginSendToAll(SendOptions opts, byte[] data)
+        /// <summary>
+        /// TODO
+        /// </summary>
+        /// <param name="opts"></param>
+        /// <param name="data"></param>
+        public void BeginSendToAll(SendOptions opts, byte[] data)
         {
             lock (peersLockObject)
             {
@@ -348,7 +366,11 @@ namespace FalconUDP
             }
         }
         
-        public static List<Packet> ReadReceivedPackets()
+        /// <summary>
+        /// TODO
+        /// </summary>
+        /// <returns></returns>
+        public List<Packet> ReadReceivedPackets()
         {
             int count = 0;
 
@@ -375,7 +397,7 @@ namespace FalconUDP
             }
         }
 
-        private static void BeginSendTo(IPEndPoint endPoint, SendOptions opts, PacketType type, byte[] payload)
+        private void BeginSendTo(IPEndPoint endPoint, SendOptions opts, PacketType type, byte[] payload)
         {
             RemotePeer rp;
             if (!peersByIp.TryGetValue(endPoint, out rp))
@@ -388,8 +410,8 @@ namespace FalconUDP
                 rp.BeginSend(opts, type, payload);
             }
         }
-
-        internal static void EndSendToCallback(IAsyncResult result)
+        
+        internal void EndSendToCallback(IAsyncResult result)
         {
             try
             {
@@ -398,11 +420,11 @@ namespace FalconUDP
             catch (SocketException se)
             {
                 // TODO handel depeding on error code
-                Falcon.Log(LogLevel.Error, "BeginSendTo() SocketException: " + se.Message);
+                Log(LogLevel.Error, "BeginSendTo() SocketException: " + se.Message);
             }
         }
 
-        private static void ACKCheckTick(object dummy)
+        private void ACKCheckTick(object dummy)
         {
             // NOTE: This callback is run on some arbitary thread in the ThreadPool.
 
@@ -430,15 +452,15 @@ namespace FalconUDP
                     foreach (AwaitingAcceptDetail aad in awaitingAcceptDetails)
                     {
                         aad.Ticks++;
-                        if (aad.Ticks == Settings.ACK_TIMEOUT_TICKS)
+                        if (aad.Ticks == Settings.ACKTimeoutTicks)
                         {
                             aad.Ticks = 0;
                             aad.RetryCount++;
-                            if (aad.RetryCount == 1) // TODO review
+                            if (aad.RetryCount == Settings.ACKRetyAttempts)
                             {
                                 // give up, peer has not been added yet so no need to drop
                                 awaitingAcceptDetailsToRemove.Add(aad);
-                                aad.Callback(new TryResult(false, String.Format("Remote peer never responded join request.")));
+                                aad.Callback(new TryResult(false, String.Format("Remote peer never responded to join request.")));
                             }
                             else
                             {
@@ -459,44 +481,15 @@ namespace FalconUDP
                 }
             }
         }
-
-        private static bool TryAddPeer(IPEndPoint ip, byte[] buffer, int sizeOfPacket, out RemotePeer peer)
-        {
-            // ASSUMPTION: Caller has checked peer is indeed requesting to be added!
-
-            string pass = null;
-            byte payloadSize = receiveBuffer[2];
-            if (payloadSize > 0)
-                pass = Settings.TEXT_ENCODING.GetString(receiveBuffer, Settings.NORMAL_HEADER_SIZE, payloadSize);
-
-            if (pass != networkPass) // TODO something else?
-            {
-                peer = null;
-                Log(LogLevel.Info, String.Format("Join request from: {0} dropped, bad pass.", ip));
-                return false; // TODO should we send something?
-            }
-            else if (peersByIp.ContainsKey(ip))
-            {
-                peer = null;
-                Log(LogLevel.Warning, String.Format("Cannot add peer again: {0}, peer is already added!", ip));
-                return false; // TODO should we send something?
-            }
-            else
-            {
-                peer = AddPeer(ip);
-                peer.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null);
-                return true;
-            }
-        }
-
-        internal static RemotePeer AddPeer(IPEndPoint ip)
+        
+        internal RemotePeer AddPeer(IPEndPoint ip)
         {
             lock (peersLockObject) // application can use the peer collections e.g. SendToAll()
             {
                 peerIdCount++;
-                int peerId = peerIdCount;
-                RemotePeer rp = new RemotePeer(peerId, ip);
-                peersById.Add(peerId, rp);
+
+                RemotePeer rp = new RemotePeer(this, peerIdCount, ip);
+                peersById.Add(peerIdCount, rp);
                 peersByIp.Add(ip, rp);
 
                 // raise peer added event 
@@ -507,7 +500,7 @@ namespace FalconUDP
             }
         }
 
-        private static void RemovePeer(IPEndPoint ip)
+        private void RemovePeer(IPEndPoint ip)
         {
             RemotePeer rp;
             lock (peersLockObject) // application can use this collection e.g. SendToAll()
@@ -529,7 +522,7 @@ namespace FalconUDP
                     PeerDropped(rp.Id);
         }
         
-        public static void RemovePeer(int id)
+        public void RemovePeer(int id)
         {
             RemotePeer rp;
             lock (peersLockObject) // application can use this collection e.g. SendToAll()
@@ -551,7 +544,7 @@ namespace FalconUDP
                     PeerDropped(id);
         }
 
-        private static void AddWaitingAcceptDetail(AwaitingAcceptDetail detail)
+        private void AddWaitingAcceptDetail(AwaitingAcceptDetail detail)
         {
             lock (awaitingAcceptDetails)
             {
@@ -559,7 +552,7 @@ namespace FalconUDP
             }
         }
 
-        private static bool TryGetAndRemoveWaitingAcceptDetail(IPEndPoint ip, out AwaitingAcceptDetail detail)
+        private bool TryGetAndRemoveWaitingAcceptDetail(IPEndPoint ip, out AwaitingAcceptDetail detail)
         {
             bool found = false;
             lock (awaitingAcceptDetails)
@@ -574,7 +567,7 @@ namespace FalconUDP
             return found;
         }
 
-        private static void RemoveWaitingAcceptDetail(AwaitingAcceptDetail detail)
+        private void RemoveWaitingAcceptDetail(AwaitingAcceptDetail detail)
         {
             lock (awaitingAcceptDetails)
             {
@@ -582,7 +575,7 @@ namespace FalconUDP
             }
         }
         
-        internal static void Log(LogLevel lvl, string msg)
+        internal void Log(LogLevel lvl, string msg)
         {
             if (lvl >= logLvl)
             {

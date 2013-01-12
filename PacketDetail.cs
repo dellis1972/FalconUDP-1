@@ -16,6 +16,7 @@ namespace FalconUDP
             this.RawPacket = rawPacket;
             this.ACKCallback = ackCallback;
             this.ACKTicks = 0;
+            this.ResentCount = 0;
         }
     }
 }

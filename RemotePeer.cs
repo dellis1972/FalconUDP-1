@@ -11,6 +11,7 @@ namespace FalconUDP
         internal IPEndPoint EndPoint;
         internal int PacketCount;                               // number of received packets not yet retrived by application
 
+        private FalconPeer localPeer;                           // local peer this remote peers has joined
         private byte sendSeqCount;
         private int sendActualSeqCount;
         private int receivedSeqLoopCount;
@@ -31,13 +32,14 @@ namespace FalconUDP
         private bool hasResynchedAndHasPacketsPreSynch;
         private byte[] payloadSizeBytes = new byte[2];          // buffer recycled for headers with payload size as ushort 
 
-        internal RemotePeer(int id, IPEndPoint endPoint)
+        internal RemotePeer(FalconPeer localPeer, int id, IPEndPoint endPoint)
         {
             this.Id                     = id;
+            this.localPeer              = localPeer;
             this.sendSeqCount           = 0;
             this.EndPoint               = endPoint;
-            this.receiveBuffer          = new byte[Settings.MAX_DATAGRAM_SIZE];
-            this.sendBuffer             = new byte[Settings.MAX_DATAGRAM_SIZE];
+            this.receiveBuffer          = new byte[Const.MAX_DATAGRAM_SIZE];
+            this.sendBuffer             = new byte[Const.MAX_DATAGRAM_SIZE];
             this.sendPacketSize         = 0;
             this.PacketCount            = 0;
             this.receivedPackets        = new SortedList<uint, Packet>();
@@ -61,22 +63,22 @@ namespace FalconUDP
                 foreach (KeyValuePair<int, PacketDetail> kv in sentPacketsAwaitingACK)
                 {
                     kv.Value.ACKTicks++;
-                    if (kv.Value.ACKTicks == Settings.ACK_TIMEOUT_TICKS)
+                    if (kv.Value.ACKTicks == Settings.ACKTimeoutTicks)
                     {
                         kv.Value.ACKTicks = 0;
                         kv.Value.ResentCount++;
-                        if (kv.Value.ResentCount == Settings.ACK_RETRY_ATTEMPTS)
+                        if (kv.Value.ResentCount == Settings.ACKRetyAttempts)
                         {
                             // give-up, assume the peer has disconnected and drop it
                             sentPacketsAwaitingACKToRemove.Add(kv.Key);
-                            Falcon.RemotePeersToDrop.Add(this);
-                            Falcon.Log(LogLevel.Warning, String.Format("Peer dropped - failed to ACK {0} re-sends of Reliable packet in time.", Settings.ACK_RETRY_ATTEMPTS));
+                            localPeer.RemotePeersToDrop.Add(this);
+                            localPeer.Log(LogLevel.Warning, String.Format("Peer dropped - failed to ACK {0} re-sends of Reliable packet in time.", Settings.ACKRetyAttempts));
                         }
                         else
                         {
                             // try again, re-send the packet
                             BeginSend(kv.Value);
-                            Falcon.Log(LogLevel.Info, String.Format("Packet to: {0} re-sent as not ACKnowledged in time.", this.EndPoint));
+                            localPeer.Log(LogLevel.Info, String.Format("Packet to: {0} re-sent as not ACKnowledged in time.", this.EndPoint));
                         }
                     }
                 }
@@ -99,8 +101,49 @@ namespace FalconUDP
 
         internal void BeginSend(SendOptions opts, PacketType type, byte[] payload, Action ackCallback)
         {
-            // fill send buffer with raw packet from opts, type and payload
-            PackagePacket(opts, type, payload);
+            HeaderPayloadSizeType hpst = HeaderPayloadSizeType.Byte;
+
+            if (payload != null && payload.Length > Byte.MaxValue) // relies on short-circut if payload is null
+            {
+                hpst = HeaderPayloadSizeType.UInt16;
+                if (payload.Length > Const.MAX_DATAGRAM_SIZE)
+                {
+                    // We could fragment the payload into seperate packets but then we would have 
+                    // to send them reliably so can be assembled at the other end. FalconUDP is 
+                    // designed for small packets - keep it that way!
+
+                    throw new InvalidOperationException(String.Format("Data size: {0}, greater than max allowed: {1}.", payload.Length, Const.MAX_DATAGRAM_SIZE));
+                }
+            }
+
+            sendSeqCount++;         // NOTE: will be reset to 0 if 255
+            sendActualSeqCount++;   // keep track of actual seq num used for ACK's
+
+            sendBuffer[0] = sendSeqCount;
+            sendBuffer[1] = (byte)((byte)hpst | (byte)opts | (byte)type);
+
+            if (payload == null)
+            {
+                sendBuffer[2] = 0;
+                sendPacketSize = Const.NORMAL_HEADER_SIZE;
+            }
+            else
+            {
+                if (hpst == HeaderPayloadSizeType.Byte)
+                {
+                    sendBuffer[2] = (byte)payload.Length;
+                    sendPacketSize = payload.Length + Const.NORMAL_HEADER_SIZE;
+                    Buffer.BlockCopy(payload, 0, sendBuffer, Const.NORMAL_HEADER_SIZE, payload.Length);
+                }
+                else
+                {
+                    byte[] payloadSizeInBytes = BitConverter.GetBytes((ushort)payload.Length);
+                    sendBuffer[2] = payloadSizeInBytes[0];
+                    sendBuffer[3] = payloadSizeInBytes[1];
+                    sendPacketSize = payload.Length + Const.LARGE_HEADER_SIZE;
+                    Buffer.BlockCopy(payload, Const.LARGE_HEADER_SIZE, sendBuffer, Const.LARGE_HEADER_SIZE, payload.Length);
+                }
+            }
 
             // If ACK required add detail - just before we send - to be sure we know about it when 
             // we get the reply ACK.
@@ -122,7 +165,8 @@ namespace FalconUDP
             }
             else if (ackCallback != null)
             {
-                // it is an error to supply an ackCallback but not send reliably...
+                // it is an error to supply an ackCallback but not send Reliable...
+                localPeer.Log(LogLevel.Warning, String.Format("ACKCallback supplied in BeginSendTo() {0}, but SendOptions not Reliable - callback will never called.", peerName));
             }
 
             // au revior 
@@ -171,7 +215,7 @@ namespace FalconUDP
                     backlog.Add(copy);
                 }
             }
-            else 
+            else if (sendActualSeqCount > 2147483000) // dont bother checking if we arn't even close
             {
                 // It seems unfortunate we have to obtain a lock on backlog for what will only be 
                 // neccessary after every 2 147 483 646 packets received! TODO
@@ -193,7 +237,7 @@ namespace FalconUDP
 
             try
             {
-                Falcon.Sender.BeginSendTo(rawPacket, 0, count, SocketFlags.None, EndPoint, EndSendToCallback, null);
+                localPeer.Sender.BeginSendTo(rawPacket, 0, count, SocketFlags.None, EndPoint, EndSendToCallback, null);
             }
             catch (SocketException se)
             {
@@ -204,7 +248,7 @@ namespace FalconUDP
             // Re-synch if we are going to exceed max seq and backlog subsequent sends until 
             // recipt of ACKnowledgment.
 
-            if (sendActualSeqCount == Settings.MAX_ACTUAL_SEQ)
+            if (sendActualSeqCount == Const.MAX_ACTUAL_SEQ)
             {
                 BeginSend(SendOptions.None, PacketType.Resynch, null, new Action(delegate()
                     {
@@ -219,12 +263,12 @@ namespace FalconUDP
         {
             try
             {
-                Falcon.Sender.EndSendTo(result);
+                localPeer.Sender.EndSendTo(result);
             }
             catch (SocketException se)
             {
                 // TODO drop this peer?
-                Falcon.Log(LogLevel.Error, String.Format("Sending to: {0}, Socket Exception: {1}.", EndPoint, se.Message));
+                localPeer.Log(LogLevel.Error, String.Format("Sending to: {0}, Socket Exception: {1}.", EndPoint, se.Message));
             }
         }
 
@@ -233,81 +277,44 @@ namespace FalconUDP
             sendSeqCount = 0;
             sendActualSeqCount = 0;
             receivedSeqLoopCount = 0;
-            receivedSeqMax = Settings.HALF_MAX_SEQ_NUMS;
+            receivedSeqMax = Const.HALF_MAX_SEQ_NUMS;
             receivedSeqLoopCutoff = 0;
             receivedSeqInOrderMax = 0;
             readInOrderSeqMax = 0;
         }
 
-        private void PackagePacket(SendOptions opts, PacketType type, byte[] data)
-        {
-            HeaderPayloadSizeType hpst = HeaderPayloadSizeType.Byte;
-
-            if (data != null && data.Length > Byte.MaxValue) // relies on short-circut if data is null
-            {
-                hpst = HeaderPayloadSizeType.UInt16;
-                if (data.Length > Settings.MAX_DATAGRAM_SIZE)
-                {
-                    // We could fragment the payload into seperate packets but then we would have 
-                    // to send them reliably so can be assembled at the other end. FalconUDP is 
-                    // designed for small packets - keep it that way!
-
-                    throw new InvalidOperationException(String.Format("Data size: {0}, greater than max allowed: {1}.", data.Length, Settings.MAX_DATAGRAM_SIZE));
-                }
-            }
-
-            sendSeqCount++;         // NOTE: will be reset to 0 if 255
-            sendActualSeqCount++;   // keep track of actual seq num used for ACK's
-
-            sendBuffer[0] = sendSeqCount;
-            sendBuffer[1] = (byte)((byte)hpst | (byte)opts | (byte)type);
-
-            if (data == null)
-            {
-                sendBuffer[2] = 0;
-                sendPacketSize = Settings.NORMAL_HEADER_SIZE;
-            }
-            else
-            {
-                if (hpst == HeaderPayloadSizeType.Byte)
-                {
-                    sendBuffer[2] = (byte)data.Length;
-                    sendPacketSize = data.Length + Settings.NORMAL_HEADER_SIZE;
-                    data.CopyTo(sendBuffer, Settings.NORMAL_HEADER_SIZE);
-                }
-                else
-                {
-                    byte[] payloadSizeInBytes = BitConverter.GetBytes((ushort)data.Length);
-                    sendBuffer[2] = payloadSizeInBytes[0];
-                    sendBuffer[3] = payloadSizeInBytes[1];
-                    sendPacketSize = data.Length + Settings.LARGE_HEADER_SIZE;
-                    data.CopyTo(sendBuffer, Settings.LARGE_HEADER_SIZE);
-                }
-            }
-        }
-
         internal void AddReceivedDatagram(int size, byte[] buffer)
         {
-            if (size < Settings.NORMAL_HEADER_SIZE)
+            if (size < Const.NORMAL_HEADER_SIZE)
             {
-                Falcon.Log(LogLevel.Error, String.Format("Datagram dropped - size: {0}, less than min header size: {1}.", size, Settings.NORMAL_HEADER_SIZE));
+                localPeer.Log(LogLevel.Error, String.Format("Datagram dropped - size: {0}, less than min header size: {1}.", size, Const.NORMAL_HEADER_SIZE));
                 return;
             }
 
             byte seq = buffer[0];
 
             // parse packet info byte
-            HeaderPayloadSizeType hpst = (HeaderPayloadSizeType)(receiveBuffer[1] & Settings.PAYLOAD_SIZE_TYPE_MASK);
-            SendOptions opts = (SendOptions)(receiveBuffer[1] & Settings.SEND_OPTS_MASK);
-            PacketType type = (PacketType)(receiveBuffer[1] & Settings.PACKET_TYPE_MASK);
+            HeaderPayloadSizeType hpst = (HeaderPayloadSizeType)(receiveBuffer[1] & Const.PAYLOAD_SIZE_TYPE_MASK);
+            SendOptions opts = (SendOptions)(receiveBuffer[1] & Const.SEND_OPTS_MASK);
+            PacketType type = (PacketType)(receiveBuffer[1] & Const.PACKET_TYPE_MASK);
 
             // check the header makes sense
-            if (!Enum.IsDefined(Const.HeaderPayloadSizeTypeType, hpst)
-                || !Enum.IsDefined(Const.SendOptionsType, opts)
-                || !Enum.IsDefined(Const.PacketTypeType, type))
+            if (!Enum.IsDefined(Const.HEADER_PAYLOAD_SIZE_TYPE_TYPE, hpst)
+                || !Enum.IsDefined(Const.SEND_OPTIONS_TYPE, opts)
+                || !Enum.IsDefined(Const.PACKET_TYPE_TYPE, type))
             {
-                Falcon.Log(LogLevel.Warning, String.Format("Dropped packet from peer: {0}, bad header.", peerName));
+                localPeer.Log(LogLevel.Warning, String.Format("Dropped packet from peer: {0}, bad header.", peerName));
                 return;
+            }
+
+            // zero sized packets that don't require ACK
+            switch (type)
+            {
+                case PacketType.AddPeer:
+                    {
+                        // must be hasn't received Accept yet
+                        return;
+                    }
             }
 
             // parse payload size
@@ -315,20 +322,20 @@ namespace FalconUDP
             if (hpst == HeaderPayloadSizeType.Byte)
             {
                 payloadSize = receiveBuffer[3];
-                payloadStartIndex = Settings.NORMAL_HEADER_SIZE;
+                payloadStartIndex = Const.NORMAL_HEADER_SIZE;
             }
             else
             {
-                if (size < Settings.LARGE_HEADER_SIZE)
+                if (size < Const.LARGE_HEADER_SIZE)
                 {
-                    Falcon.Log(LogLevel.Error, String.Format("Datagram with large header specified dropped - size: {0}, less than large header size: {1}.", size, Settings.LARGE_HEADER_SIZE));
+                    localPeer.Log(LogLevel.Error, String.Format("Datagram with large header specified dropped - size: {0}, less than large header size: {1}.", size, Const.LARGE_HEADER_SIZE));
                     return;
                 }
 
 
                 Buffer.BlockCopy(buffer, 2, payloadSizeBytes, 0, 2);
                 payloadSize = BitConverter.ToUInt16(payloadSizeBytes, 0);
-                payloadStartIndex = Settings.LARGE_HEADER_SIZE;
+                payloadStartIndex = Const.LARGE_HEADER_SIZE;
             }
 
 
@@ -342,7 +349,7 @@ namespace FalconUDP
                     if (!sentPacketsAwaitingACK.TryGetValue(actualSeqACKFor, out detail))
                     {
                         // ACK has arrived too late and the packet must have already been removed.
-                        Falcon.Log(LogLevel.Warning, "Packet for ACK not found - must be too late."); // TODO packet summary
+                        localPeer.Log(LogLevel.Warning, "Packet for ACK not found - must be too late."); // TODO packet summary
                         return;
                     }
 
@@ -404,7 +411,7 @@ namespace FalconUDP
                                         // Either packet it out-of-order by a multiple of 
                                         // MAX_SEQ_NUMS or duplicated.
 
-                                        Falcon.Log(LogLevel.Warning, String.Format("Dropped packet from {0}, duplicate seq.", peerName));
+                                        localPeer.Log(LogLevel.Warning, String.Format("Dropped packet from {0}, duplicate seq.", peerName));
                                     }
                                     else
                                     {
@@ -455,7 +462,7 @@ namespace FalconUDP
             // extreme case - setting this range to 0 - we can only be tolerant of out-of-order 
             // within + or - MAX_SEQ_NUMS, i.e. one loop.
 
-            actualSeq = seq + (Settings.MAX_SEQ_NUMS * receivedSeqLoopCount);
+            actualSeq = seq + (Const.MAX_SEQ_NUMS * receivedSeqLoopCount);
 
             bool reqReliable = (opts & SendOptions.Reliable) == SendOptions.Reliable;
 
@@ -465,7 +472,7 @@ namespace FalconUDP
                 //             yet, or out-of-order to the extent validation will drop it, or 
                 //             out-of-order to the extent we cannot tell we are out-of-order!
 
-                actualSeq += Settings.MAX_SEQ_NUMS;
+                actualSeq += Const.MAX_SEQ_NUMS;
             }
             else
             {
@@ -474,7 +481,7 @@ namespace FalconUDP
                 {
                     if (reqReliable)
                         BeginSendAntiACK(actualSeq);
-                    Falcon.Log(LogLevel.Warning, String.Format("Dropped packet too late from {0}.", peerName));
+                    localPeer.Log(LogLevel.Warning, String.Format("Dropped packet too late from {0}.", peerName));
                     return false;
                 }
             }
@@ -490,17 +497,17 @@ namespace FalconUDP
 
                     if (reqReliable)
                         BeginSendAntiACK(actualSeq);
-                    Falcon.Log(LogLevel.Warning, String.Format("Dropped packet too early from {0}.", peerName));
+                    localPeer.Log(LogLevel.Warning, String.Format("Dropped packet too early from {0}.", peerName));
                     return false;
                 }
 
                 // update the max seq received and the trailing cutoff point
                 receivedSeqMax = actualSeq;
-                receivedSeqLoopCutoff = receivedSeqMax - Settings.HALF_MAX_SEQ_NUMS;
+                receivedSeqLoopCutoff = receivedSeqMax - Const.HALF_MAX_SEQ_NUMS;
 
 
                 // update the loop count if cutoff / MAX_SEQ is greater than it
-                int minLoopCount = receivedSeqLoopCutoff / Settings.MAX_SEQ_NUMS;
+                int minLoopCount = receivedSeqLoopCutoff / Const.MAX_SEQ_NUMS;
                 if (minLoopCount > receivedSeqLoopCount)
                     receivedSeqLoopCount = minLoopCount;
             }

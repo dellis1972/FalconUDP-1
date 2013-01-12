@@ -8,9 +8,9 @@ using System.Threading;
 
 namespace FalconUDP
 {
-    public static partial class Falcon
+    public partial class FalconPeer
     {
-        private static void Listen()
+        private void Listen()
         {
             while (true)
             {
@@ -26,7 +26,8 @@ namespace FalconUDP
                     //-------------------------------------------------------------------------
 
                     IPEndPoint ip = (IPEndPoint)lastRemoteEndPoint;
-
+                    ip.Port = this.port; // http://stackoverflow.com/questions/14292602/remote-endpoint-after-socket-receivefrom-has-wrong-port-number
+                    
                     if (sizeReceived == 0)
                     {
                         // peer closed connection
@@ -40,11 +41,30 @@ namespace FalconUDP
                         // Could be the peer has not been added yet and is requesting to be added. 
                         // Or it could be we are asking to be added and peer is accepting!
 
-                        if (sizeReceived >= Settings.NORMAL_HEADER_SIZE && receiveBuffer[1] == Settings.JOIN_PACKET_INFO)
+                        if (sizeReceived >= Const.NORMAL_HEADER_SIZE && receiveBuffer[1] == Const.JOIN_PACKET_INFO)
                         {
-                            TryAddPeer(ip, receiveBuffer, sizeReceived, out rp);
+                            string pass = null;
+                            byte payloadSize = receiveBuffer[2];
+                            if (payloadSize > 0)
+                                pass = Settings.TextEncoding.GetString(receiveBuffer, Const.NORMAL_HEADER_SIZE, payloadSize);
+
+                            if (pass != networkPass) // TODO something else?
+                            {
+                                // TODO send reject and reason
+                                Log(LogLevel.Info, String.Format("Join request from: {0} dropped, bad pass.", ip));
+                            }
+                            else if (peersByIp.ContainsKey(ip))
+                            {
+                                // TODO send reject and reason
+                                Log(LogLevel.Warning, String.Format("Cannot add peer again: {0}, peer is already added!", ip));
+                            }
+                            else
+                            {
+                                rp = AddPeer(ip);
+                                rp.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null);
+                            }
                         }
-                        else if (sizeReceived >= Settings.NORMAL_HEADER_SIZE && (receiveBuffer[1] & (byte)PacketType.AcceptJoin) == (byte)PacketType.AcceptJoin)
+                        else if (sizeReceived >= Const.NORMAL_HEADER_SIZE && (receiveBuffer[1] & (byte)PacketType.AcceptJoin) == (byte)PacketType.AcceptJoin)
                         {
                             AwaitingAcceptDetail detail;
                             if (!TryGetAndRemoveWaitingAcceptDetail(ip, out detail))
@@ -58,7 +78,7 @@ namespace FalconUDP
                             }
                             else
                             {
-                                // create the new peer, add the Accept to send ACK, call the callback
+                                // create the new peer, add the datagram to send ACK, call the callback
                                 rp = AddPeer(ip);
                                 rp.AddReceivedDatagram(sizeReceived, receiveBuffer);
                                 TryResult tr = new TryResult(true, null, null, rp.Id);
