@@ -27,12 +27,16 @@ namespace FalconUDP
 
                     IPEndPoint ip = (IPEndPoint)lastRemoteEndPoint;
 
-                    // TODO should we listen to self? 
-                    //if (IPAddress.IsLoopback(ip.Address))
-                    //{
-                    //    Log(LogLevel.Warning, "Dropped datagram received from loopback.");
-                    //    continue;
-                    //}
+                    // Do not listen to packets sent by us to us. This only drops packets from the 
+                    // same instance of Falcon (i.e. on the same port) so we can still send/recv 
+                    // packets from another instance of Falcon (i.e. on different port) on the 
+                    // same host.
+
+                    if (IPAddress.IsLoopback(ip.Address) && ip.Port == localPort)
+                    {
+                        Log(LogLevel.Warning, "Dropped datagram received from self.");
+                        continue;
+                    }
                     
                     if (sizeReceived == 0)
                     {

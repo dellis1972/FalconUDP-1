@@ -41,13 +41,15 @@ namespace FalconUDP
 {
     public partial class FalconPeer
     {
+        // TODO: events the proper way http://msdn.microsoft.com/en-us/library/w369ty8x.aspx
         public event PeerAdded PeerAdded;
         public event PeerDropped PeerDropped;
+        public event PongReceived PongReceived;
 
         internal Socket Sock;
         internal List<RemotePeer> RemotePeersToDrop;            // only ACKCheckTick() uses this 
 
-        private int port;
+        private int localPort;
         private Dictionary<IPEndPoint, RemotePeer> peersByIp;   //} Collections hold refs to the same RemotePeers,
         private Dictionary<int, RemotePeer> peersById;          //} just offer different ways to look them up
         private object peersLockObject;                         // used to lock when using above peer collections
@@ -79,7 +81,7 @@ namespace FalconUDP
         /// Level at which to log at - this level and more serious levels are logged.</param>
         public FalconPeer(int port, string netPass, LogCallback logCallback = null, LogLevel logLevel = LogLevel.Warning)
         {
-            this.port = port;
+            this.localPort = port;
             this.networkPass = netPass;
             this.logLvl = logLevel;
 
@@ -88,7 +90,7 @@ namespace FalconUDP
 
             this.RemotePeersToDrop = new List<RemotePeer>();
 
-            this.anyAddrEndPoint = new IPEndPoint(IPAddress.Any, this.port);
+            this.anyAddrEndPoint = new IPEndPoint(IPAddress.Any, this.localPort);
 
             this.receiveBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
             this.sendBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
@@ -156,7 +158,7 @@ namespace FalconUDP
                 return new TryResult(tse);
             }
 
-            Log(LogLevel.Info, String.Format("Started, listening on port: {0}", this.port));
+            Log(LogLevel.Info, String.Format("Started, listening on port: {0}", this.localPort));
 
             return TryResult.SuccessResult;
         }
@@ -204,10 +206,28 @@ namespace FalconUDP
         /// <param name="pass">
         /// Password remote peer requires, if any.</param>
         /// <returns>
+        /// TryResult either success, or failed with message, and maybe exception, containing fail reason.</returns>
+        /// <remarks>
+        /// This overload uses the same port number as this FalconPeer.</remarks>
+        public TryResult TryJoinPeer(string addr, string pass = null)
+        {
+            return TryJoinPeer(addr, this.localPort, pass);
+        }
+
+        /// <summary>
+        /// Attempts to connect to the remote peer. If successful Falcon can send and receive from 
+        /// this peer. This Method blocks until operation is complete.</summary>
+        /// <param name="addr">
+        /// IP address of remote peer.</param>
+        /// <param name="port">
+        /// Port remote peer is listening on.</param>
+        /// <param name="pass">
+        /// Password remote peer requires, if any.</param>
+        /// <returns>
         /// TryResult either success, or failed with message or exception containing fail reason.</returns>
         /// <remarks>
         /// This Method uses BeginTryJoinPeer() and blocks until callback is called.</remarks>
-        public TryResult TryJoinPeer(string addr, string pass = null)
+        public TryResult TryJoinPeer(string addr, int port, string pass = null)
         {
             IPAddress ip;
             if (!IPAddress.TryParse(addr, out ip))
@@ -217,13 +237,13 @@ namespace FalconUDP
             else
             {
                 ManualResetEvent awaitCallback = new ManualResetEvent(false);
-                IPEndPoint endPoint = new IPEndPoint(ip, this.port);
+                IPEndPoint endPoint = new IPEndPoint(ip, port);
                 TryResult tr = null;
                 BeginTryJoinPeer(endPoint, pass, new TryCallback(delegate(TryResult result)
-                {
-                    tr = result;
-                    awaitCallback.Set();
-                }));
+                    {
+                        tr = result;
+                        awaitCallback.Set();
+                    }));
                 awaitCallback.WaitOne();
                 return tr;
             }
@@ -240,7 +260,7 @@ namespace FalconUDP
         /// Callback to call when operation completes.</param>
         /// <param name="pass">
         /// Password remote peer requires, if any.</param>
-        public void BeginTryJoinPeer(string addr, TryCallback callback, string pass = null)
+        public void BeginTryJoinPeer(string addr, int port, TryCallback callback, string pass = null)
         {
             if (stop)
                 callback(new TryResult(false, "Falcon is not started!"));
@@ -252,7 +272,7 @@ namespace FalconUDP
             }
             else
             {
-                IPEndPoint endPoint = new IPEndPoint(ip, this.port);
+                IPEndPoint endPoint = new IPEndPoint(ip, port);
                 BeginTryJoinPeer(endPoint, pass, callback);
             }
         }
@@ -393,6 +413,29 @@ namespace FalconUDP
             }
         }
 
+        public bool PingPeer(int id)
+        {
+            lock(peersLockObject)
+            {
+                RemotePeer rp;
+                if (!peersById.TryGetValue(id, out rp))
+                {
+                    return false;
+                }
+                else
+                {
+                    rp.Ping();
+                    return true;
+                }
+            }
+        }
+
+        internal void RaisePongReceived(RemotePeer rp)
+        {
+            if(PongReceived != null)
+                PongReceived(rp.Id);
+        }
+
         private void BeginSendTo(IPEndPoint endPoint, SendOptions opts, PacketType type, byte[] payload)
         {
             RemotePeer rp;
@@ -407,19 +450,6 @@ namespace FalconUDP
             }
         }
         
-        internal void EndSendToCallback(IAsyncResult result)
-        {
-            try
-            {
-                Sock.EndSendTo(result);
-            }
-            catch (SocketException se)
-            {
-                // TODO handel depeding on error code
-                Log(LogLevel.Error, "BeginSendTo() SocketException: " + se.Message);
-            }
-        }
-
         private void ACKCheckTick(object dummy)
         {
             // NOTE: This callback is run on some arbitary thread in the ThreadPool.

@@ -92,6 +92,11 @@ namespace FalconUDP
             }
         }
 
+        internal void Ping()
+        {
+            __BeginSend__(Const.PING_PACKET);
+        }
+
         internal void BeginSend(SendOptions opts, PacketType type, byte[] payload)
         {
             BeginSend(opts, type, payload, null);
@@ -307,6 +312,16 @@ namespace FalconUDP
             // zero sized packets that don't require ACK
             switch (type)
             {
+                case PacketType.Ping:
+                    {
+                        __BeginSend__(Const.PONG_PACKET);
+                        return;
+                    }
+                case PacketType.Pong:
+                    {
+                        localPeer.RaisePongReceived(this);
+                    }
+                    break;
                 case PacketType.AddPeer:
                     {
                         // Must be hasn't received Accept yet (otherwise AddPeer wouldn't have go 
@@ -320,7 +335,7 @@ namespace FalconUDP
             int payloadSize, payloadStartIndex;
             if (hpst == HeaderPayloadSizeType.Byte)
             {
-                payloadSize = buffer[3];
+                payloadSize = buffer[2];
                 payloadStartIndex = Const.NORMAL_HEADER_SIZE;
             }
             else
@@ -389,7 +404,7 @@ namespace FalconUDP
                             {
                                 // copy packet's payload to list of received for reading by the application
 
-                                byte[] payload = new byte[payloadSize - payloadStartIndex];
+                                byte[] payload = new byte[payloadSize];
                                 Buffer.BlockCopy(buffer, payloadStartIndex, payload, 0, payload.Length);
 
                                 lock (receivedPackets) // collection also used by application
