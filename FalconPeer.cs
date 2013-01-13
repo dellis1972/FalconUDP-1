@@ -456,7 +456,7 @@ namespace FalconUDP
                         {
                             aad.Ticks = 0;
                             aad.RetryCount++;
-                            if (aad.RetryCount == Settings.ACKRetyAttempts)
+                            if (aad.RetryCount == Settings.ACKRetryAttempts)
                             {
                                 // give up, peer has not been added yet so no need to drop
                                 awaitingAcceptDetailsToRemove.Add(aad);
@@ -500,7 +500,7 @@ namespace FalconUDP
             }
         }
 
-        private void RemovePeer(IPEndPoint ip)
+        private void TryRemovePeer(IPEndPoint ip)
         {
             RemotePeer rp;
             lock (peersLockObject) // application can use this collection e.g. SendToAll()

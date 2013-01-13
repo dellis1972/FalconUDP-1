@@ -19,10 +19,9 @@ namespace FalconUDP
         private int receivedSeqLoopCutoff;
         private int receivedSeqInOrderMax;
         private int readInOrderSeqMax;                          // differs from receivedInOrderMax in that = max actually retrived by application
-        private SortedList<uint, Packet> receivedPackets;       // packets received from this peer not yet retrived by application TODO after a re-synch new packets will erroneously be pushed to the top of the list...
+        private SortedList<uint, Packet> receivedPackets;       // packets received from this peer not yet retrived by application
         private SortedList<int, PacketDetail> sentPacketsAwaitingACK;
         private List<int> sentPacketsAwaitingACKToRemove;
-        private byte[] receiveBuffer;
         private byte[] sendBuffer;                              // buffer recycled for every packet sent to this peer
         private int sendPacketSize;                             // the size of the current packet to be sent in SendBuffer
         private string peerName;                                // e.g. IP address, used internally for logging
@@ -38,7 +37,6 @@ namespace FalconUDP
             this.localPeer              = localPeer;
             this.sendSeqCount           = 0;
             this.EndPoint               = endPoint;
-            this.receiveBuffer          = new byte[Const.MAX_DATAGRAM_SIZE];
             this.sendBuffer             = new byte[Const.MAX_DATAGRAM_SIZE];
             this.sendPacketSize         = 0;
             this.PacketCount            = 0;
@@ -67,12 +65,12 @@ namespace FalconUDP
                     {
                         kv.Value.ACKTicks = 0;
                         kv.Value.ResentCount++;
-                        if (kv.Value.ResentCount == Settings.ACKRetyAttempts)
+                        if (kv.Value.ResentCount > Settings.ACKRetryAttempts)
                         {
                             // give-up, assume the peer has disconnected and drop it
                             sentPacketsAwaitingACKToRemove.Add(kv.Key);
                             localPeer.RemotePeersToDrop.Add(this);
-                            localPeer.Log(LogLevel.Warning, String.Format("Peer dropped - failed to ACK {0} re-sends of Reliable packet in time.", Settings.ACKRetyAttempts));
+                            localPeer.Log(LogLevel.Warning, String.Format("Peer dropped - failed to ACK {0} re-sends of Reliable packet in time.", Settings.ACKRetryAttempts));
                         }
                         else
                         {
@@ -277,7 +275,7 @@ namespace FalconUDP
             sendSeqCount = 0;
             sendActualSeqCount = 0;
             receivedSeqLoopCount = 0;
-            receivedSeqMax = Const.HALF_MAX_SEQ_NUMS;
+            receivedSeqMax = 0;
             receivedSeqLoopCutoff = 0;
             receivedSeqInOrderMax = 0;
             readInOrderSeqMax = 0;
@@ -285,6 +283,8 @@ namespace FalconUDP
 
         internal void AddReceivedDatagram(int size, byte[] buffer)
         {
+            // NOTE: This completes synchoronously so no need to copy buffer.
+
             if (size < Const.NORMAL_HEADER_SIZE)
             {
                 localPeer.Log(LogLevel.Error, String.Format("Datagram dropped - size: {0}, less than min header size: {1}.", size, Const.NORMAL_HEADER_SIZE));
@@ -294,9 +294,9 @@ namespace FalconUDP
             byte seq = buffer[0];
 
             // parse packet info byte
-            HeaderPayloadSizeType hpst = (HeaderPayloadSizeType)(receiveBuffer[1] & Const.PAYLOAD_SIZE_TYPE_MASK);
-            SendOptions opts = (SendOptions)(receiveBuffer[1] & Const.SEND_OPTS_MASK);
-            PacketType type = (PacketType)(receiveBuffer[1] & Const.PACKET_TYPE_MASK);
+            HeaderPayloadSizeType hpst  = (HeaderPayloadSizeType)(buffer[1] & Const.PAYLOAD_SIZE_TYPE_MASK);
+            SendOptions opts            = (SendOptions)(buffer[1] & Const.SEND_OPTS_MASK);
+            PacketType type             = (PacketType)(buffer[1] & Const.PACKET_TYPE_MASK);
 
             // check the header makes sense
             if (!Enum.IsDefined(Const.HEADER_PAYLOAD_SIZE_TYPE_TYPE, hpst)
@@ -310,6 +310,11 @@ namespace FalconUDP
             // zero sized packets that don't require ACK
             switch (type)
             {
+                case PacketType.AcceptJoin:
+                    {
+ 
+                    }
+                    break;
                 case PacketType.AddPeer:
                     {
                         // must be hasn't received Accept yet
@@ -321,7 +326,7 @@ namespace FalconUDP
             int payloadSize, payloadStartIndex;
             if (hpst == HeaderPayloadSizeType.Byte)
             {
-                payloadSize = receiveBuffer[3];
+                payloadSize = buffer[3];
                 payloadStartIndex = Const.NORMAL_HEADER_SIZE;
             }
             else
@@ -341,7 +346,7 @@ namespace FalconUDP
 
             if (type == PacketType.ACK || type == PacketType.AntiACK)
             {
-                int actualSeqACKFor = BitConverter.ToInt32(receiveBuffer, payloadStartIndex);
+                int actualSeqACKFor = BitConverter.ToInt32(buffer, payloadStartIndex);
 
                 lock (sentPacketsAwaitingACK)   // ACK Tick also uses this collection
                 {
@@ -365,7 +370,7 @@ namespace FalconUDP
                     else // must be AntiACK
                     {
                         // Re-send the unACKnowledged packet right away NOTE: we are not 
-                        // incrementing resent count here becuase the remote peer must be alive to 
+                        // incrementing resent count here because the remote peer must be alive to 
                         // have sent the AntiACK.
 
                         BeginSend(detail);
@@ -389,7 +394,7 @@ namespace FalconUDP
                                 // copy packet's payload to list of received for reading by the application
 
                                 byte[] payload = new byte[payloadSize - payloadStartIndex];
-                                Buffer.BlockCopy(receiveBuffer, payloadStartIndex, payload, 0, payload.Length);
+                                Buffer.BlockCopy(buffer, payloadStartIndex, payload, 0, payload.Length);
 
                                 lock (receivedPackets) // collection also used by application
                                 {

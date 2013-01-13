@@ -26,12 +26,29 @@ namespace FalconUDP
                     //-------------------------------------------------------------------------
 
                     IPEndPoint ip = (IPEndPoint)lastRemoteEndPoint;
-                    ip.Port = this.port; // http://stackoverflow.com/questions/14292602/remote-endpoint-after-socket-receivefrom-has-wrong-port-number
+
+                    // TODO should we listen to self? Currently cannot since we have to assume the 
+                    // remote hosts port is the same as the one we are listening on for the below 
+                    // reason. Therefore cannot have more than one FalconPeer (in the same session)
+                    // on same host cause have to listen on same port.
+
+                    if (IPAddress.IsLoopback(ip.Address))
+                    {
+                        Log(LogLevel.Warning, "Dropped datagram received from loopback.");
+                        continue;
+                    }
+
+                    // We know Falcon only comms with peers on the same port so assume the port is
+                    // is the same. (Have to set this manually since:
+                    // http://stackoverflow.com/questions/14292602/remote-endpoint-after-socket-receivefrom-has-wrong-port-number
+                    // http://social.msdn.microsoft.com/Forums/en-US/netfxbcl/thread/92f6da8c-776b-413e-b27b-6f58d4069b7d).
+
+                    ip.Port = this.port; 
                     
                     if (sizeReceived == 0)
                     {
                         // peer closed connection
-                        RemovePeer(ip);
+                        TryRemovePeer(ip);
                         continue;
                     }
 
