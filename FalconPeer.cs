@@ -44,15 +44,14 @@ namespace FalconUDP
         public event PeerAdded PeerAdded;
         public event PeerDropped PeerDropped;
 
-        internal Socket Sender;
+        internal Socket Sock;
         internal List<RemotePeer> RemotePeersToDrop;            // only ACKCheckTick() uses this 
 
-        private Socket receiver;
         private int port;
         private Dictionary<IPEndPoint, RemotePeer> peersByIp;   //} Collections hold refs to the same RemotePeers,
         private Dictionary<int, RemotePeer> peersById;          //} just offer different ways to look them up
         private object peersLockObject;                         // used to lock when using above peer collections
-        private EndPoint anyRemoteEndPoint;                     // end point to listen on
+        private EndPoint anyRemoteEndPoint;                     // end point to send/receive on
         private EndPoint lastRemoteEndPoint;                    // end point data last received from
         private byte[] receiveBuffer;
         private byte[] sendBuffer;
@@ -86,8 +85,6 @@ namespace FalconUDP
 
             this.peersByIp = new Dictionary<IPEndPoint, RemotePeer>();
             this.peersById = new Dictionary<int, RemotePeer>();
-
-            this.Sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
 
             this.RemotePeersToDrop = new List<RemotePeer>();
 
@@ -135,12 +132,11 @@ namespace FalconUDP
             // Create a new socket to listen on when starting as only way to stop blocking 
             // ReceiveFrom call when stopping is closing the existing socket.
 
-            receiver = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            receiver.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.PacketInformation, true); // Guarantee the remote host endpoint is always returned: http://msdn.microsoft.com/en-us/library/system.net.sockets.socket.beginreceivefrom(v=vs.100).aspx
+            Sock = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
 
             try
             {
-                receiver.Bind(anyRemoteEndPoint);
+                Sock.Bind(anyRemoteEndPoint);
             }
             catch (SocketException se)
             {
@@ -301,13 +297,13 @@ namespace FalconUDP
 
                 try
                 {
-                    Sender.BeginSendTo(sendBuffer, 0, size, SocketFlags.None, detail.EndPoint, new AsyncCallback(delegate(IAsyncResult result)
+                    Sock.BeginSendTo(sendBuffer, 0, size, SocketFlags.None, detail.EndPoint, new AsyncCallback(delegate(IAsyncResult result)
                         {
                             // NOTE: lock on sendBuffer is lost if completed asynchoronously
 
                             try
                             {
-                                Sender.EndSendTo(result);
+                                Sock.EndSendTo(result);
                             }
                             catch (SocketException se)
                             {
@@ -415,7 +411,7 @@ namespace FalconUDP
         {
             try
             {
-                Sender.EndSendTo(result);
+                Sock.EndSendTo(result);
             }
             catch (SocketException se)
             {
@@ -557,7 +553,7 @@ namespace FalconUDP
             bool found = false;
             lock (awaitingAcceptDetails)
             {
-                detail = awaitingAcceptDetails.Find(aad => aad.EndPoint == ip);
+                detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.Address.Equals(ip.Address) && aad.EndPoint.Port == ip.Port);
                 if (detail != null)
                 {
                     found = true;

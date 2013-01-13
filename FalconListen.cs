@@ -104,7 +104,7 @@ namespace FalconUDP
                         }
                         else
                         {
-                            Log(LogLevel.Warning, String.Format("Datagram dropped - unknown peer: {0}.", ip.Address.ToString()));
+                            Log(LogLevel.Warning, String.Format("Datagram dropped - unknown peer: {0}.", ip));
                         }
                     }
                     else

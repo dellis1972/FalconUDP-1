@@ -235,7 +235,7 @@ namespace FalconUDP
 
             try
             {
-                localPeer.Sender.BeginSendTo(rawPacket, 0, count, SocketFlags.None, EndPoint, EndSendToCallback, null);
+                localPeer.Sock.BeginSendTo(rawPacket, 0, count, SocketFlags.None, EndPoint, EndSendToCallback, null);
             }
             catch (SocketException se)
             {
@@ -261,7 +261,7 @@ namespace FalconUDP
         {
             try
             {
-                localPeer.Sender.EndSendTo(result);
+                localPeer.Sock.EndSendTo(result);
             }
             catch (SocketException se)
             {
