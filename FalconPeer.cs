@@ -2,9 +2,17 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
-using System.Net.Sockets;
 using System.Text;
+#if NETFX_CORE
+using Windows.Foundation;
+using Windows.Networking;
+using Windows.Networking.Sockets;
+using System.Threading.Tasks;
+#else
+using System.Net.Sockets;
 using System.Threading;
+#endif
+
 
 /***************************************************
  * 
@@ -46,21 +54,26 @@ namespace FalconUDP
         public event PeerDropped PeerDropped;
         public event PongReceived PongReceived;
 
+#if NETFX_CORE
+        internal DatagramSocket Sock;
+        private Dictionary<HostName, RemotePeer> peersByIp;     // same RemotePeers as peersById
+#else   
         internal Socket Sock;
-        internal List<RemotePeer> RemotePeersToDrop;            // only ACKCheckTick() uses this 
-
-        private int localPort;
-        private Dictionary<IPEndPoint, RemotePeer> peersByIp;   //} Collections hold refs to the same RemotePeers,
-        private Dictionary<int, RemotePeer> peersById;          //} just offer different ways to look them up
-        private object peersLockObject;                         // used to lock when using above peer collections
+                                                        
+        private Dictionary<IPEndPoint, RemotePeer> peersByIp;   // same RemotePeers as peersById
         private EndPoint anyAddrEndPoint;                       // end point to send/receive on (combined with port to create IPEndPoint)
         private EndPoint lastRemoteEndPoint;                    // end point data last received from
+        private Thread listenThread;
+        private Timer ackCheckTimer;                            // also used for AwaitingAcceptDetail
+#endif
+        internal List<RemotePeer> RemotePeersToDrop;            // only ACKCheckTick() uses this 
+        private int localPort;
+        private Dictionary<int, RemotePeer> peersById;          // same RemotePeers as peersByIp
+        private object peersLockObject;                         // used to lock when using above peer collections
         private byte[] receiveBuffer;
         private byte[] sendBuffer;
-        private Thread listenThread;
         private bool stop;
         private string networkPass;
-        private Timer ackCheckTimer;                            // also used for AwaitingAcceptDetail
         private LogLevel logLvl; 
         private int peerIdCount;
         private byte[] payloadSizeBytes;                        // buffer to store payload size in large headers
@@ -85,21 +98,25 @@ namespace FalconUDP
             this.networkPass = netPass;
             this.logLvl = logLevel;
 
+#if NETFX_CORE
+            this.peersByIp = new Dictionary<HostName, RemotePeer>();
+#else
             this.peersByIp = new Dictionary<IPEndPoint, RemotePeer>();
-            this.peersById = new Dictionary<int, RemotePeer>();
-
-            this.RemotePeersToDrop = new List<RemotePeer>();
 
             this.anyAddrEndPoint = new IPEndPoint(IPAddress.Any, this.localPort);
-
-            this.receiveBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
-            this.sendBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
 
             this.lastRemoteEndPoint = new IPEndPoint(0, 0);
 
             this.listenThread = new Thread(Listen);
             this.listenThread.Name = "Falcon ears";
             this.listenThread.IsBackground = true;
+#endif
+            this.peersById = new Dictionary<int, RemotePeer>();
+
+            this.RemotePeersToDrop = new List<RemotePeer>();
+
+            this.receiveBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
+            this.sendBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
 
             this.peerIdCount = 0;
 
@@ -118,13 +135,61 @@ namespace FalconUDP
                 }
                 else
                 {
+#if !NETFX_CORE
                     Debug.AutoFlush = true;
-                    Debug.Indent();
+#endif
                 }
                 Log(LogLevel.Info, "Initialized");
             }
         }
+#if NETFX_CORE
+        /// <summary>
+        /// Start her up!</summary>
+        public async Task<TryResult> TryStart()
+        {
+            stop = false;
 
+            // Create a new socket when starting as only way to stop blocking ReceiveFrom call 
+            // when stopping is closing the existing socket.
+
+            Sock = new DatagramSocket();
+            Sock.MessageReceived += MessageReceived;
+
+            try
+            {
+                await Sock.BindEndpointAsync(null, localPort.ToString());
+            }
+            catch (Exception ex)
+            {
+                // This seems like a fucking retarded way of doing things, we arn't even told
+                // what exceptions could be thrown! But it is what the offical sample does: 
+                // http://code.msdn.microsoft.com/windowsapps/DatagramSocket-sample-76a7d82b/sourcecode?fileId=57971&pathId=589460989
+
+                return new TryResult(ex);
+            }
+            
+            ackCheckTimer = new Timer(ACKCheckTick, null, Settings.ACKTickTime, Settings.ACKTickTime);
+
+            try
+            {
+                listenThread.Start();
+            }
+            catch (ThreadStateException tse)
+            {
+                // e.g. user application called start when already started!
+                return new TryResult(tse);
+            }
+
+            Log(LogLevel.Info, String.Format("Started, listening on port: {0}", this.localPort));
+
+            return TryResult.SuccessResult;
+        }
+
+        private void MessageReceived(DatagramSocket sender, DatagramSocketMessageReceivedEventArgs args)
+        {
+            throw new NotImplementedException();
+        }
+#else
         /// <summary>
         /// Start her up!</summary>
         public TryResult TryStart()
@@ -162,7 +227,7 @@ namespace FalconUDP
 
             return TryResult.SuccessResult;
         }
-
+#endif
         /// <summary>
         /// Stops Falcon, will stop listening and be unable send. Connected remote peers will be 
         /// lost. To start Falcon again call Start() again.</summary>
