@@ -51,7 +51,7 @@ namespace FalconUDP
         private Dictionary<IPEndPoint, RemotePeer> peersByIp;   //} Collections hold refs to the same RemotePeers,
         private Dictionary<int, RemotePeer> peersById;          //} just offer different ways to look them up
         private object peersLockObject;                         // used to lock when using above peer collections
-        private EndPoint anyRemoteEndPoint;                     // end point to send/receive on
+        private EndPoint anyAddrEndPoint;                       // end point to send/receive on (combined with port to create IPEndPoint)
         private EndPoint lastRemoteEndPoint;                    // end point data last received from
         private byte[] receiveBuffer;
         private byte[] sendBuffer;
@@ -88,7 +88,7 @@ namespace FalconUDP
 
             this.RemotePeersToDrop = new List<RemotePeer>();
 
-            this.anyRemoteEndPoint = new IPEndPoint(IPAddress.Any, this.port);
+            this.anyAddrEndPoint = new IPEndPoint(IPAddress.Any, this.port);
 
             this.receiveBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
             this.sendBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
@@ -129,14 +129,14 @@ namespace FalconUDP
         {
             stop = false;
 
-            // Create a new socket to listen on when starting as only way to stop blocking 
-            // ReceiveFrom call when stopping is closing the existing socket.
+            // Create a new socket when starting as only way to stop blocking ReceiveFrom call 
+            // when stopping is closing the existing socket.
 
             Sock = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
 
             try
             {
-                Sock.Bind(anyRemoteEndPoint);
+                Sock.Bind(anyAddrEndPoint);
             }
             catch (SocketException se)
             {
@@ -170,7 +170,7 @@ namespace FalconUDP
 
             try
             {
-                receiver.Close();
+                Sock.Close();
             }
             catch { }
 
@@ -187,7 +187,7 @@ namespace FalconUDP
                 catch { }
             }
 
-            receiver = null;
+            Sock = null;
             peersById.Clear();
             peersByIp.Clear();
             ackCheckTimer.Dispose();

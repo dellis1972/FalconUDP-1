@@ -163,7 +163,7 @@ namespace FalconUDP
             }
             else if (ackCallback != null)
             {
-                // it is an error to supply an ackCallback but not send Reliable...
+                // it is an error to supply an ackCallback if not sending reliably...
                 localPeer.Log(LogLevel.Warning, String.Format("ACKCallback supplied in BeginSendTo() {0}, but SendOptions not Reliable - callback will never called.", peerName));
             }
 
@@ -213,11 +213,8 @@ namespace FalconUDP
                     backlog.Add(copy);
                 }
             }
-            else if (sendActualSeqCount > 2147483000) // dont bother checking if we arn't even close
+            else if (sendActualSeqCount > Const.CHECK_BACKLOG_AT) // don't bother checking (which requires lock) if we arn't even close
             {
-                // It seems unfortunate we have to obtain a lock on backlog for what will only be 
-                // neccessary after every 2 147 483 646 packets received! TODO
-
                 lock (backlog)
                 {
                     if (backlog.Count > 0 && !isClearingBacklog)
@@ -310,14 +307,11 @@ namespace FalconUDP
             // zero sized packets that don't require ACK
             switch (type)
             {
-                case PacketType.AcceptJoin:
-                    {
- 
-                    }
-                    break;
                 case PacketType.AddPeer:
                     {
-                        // must be hasn't received Accept yet
+                        // Must be hasn't received Accept yet (otherwise AddPeer wouldn't have go 
+                        // this far - as this RemotePeer wouldn't be created yet).
+
                         return;
                     }
             }
@@ -370,9 +364,11 @@ namespace FalconUDP
                     else // must be AntiACK
                     {
                         // Re-send the unACKnowledged packet right away NOTE: we are not 
-                        // incrementing resent count here because the remote peer must be alive to 
-                        // have sent the AntiACK.
+                        // incrementing resent count, we are resetting it, because the remote peer 
+                        // must be alive to have sent the AntiACK.
 
+                        detail.ACKTicks = 0;
+                        detail.ResentCount = 0;
                         BeginSend(detail);
                     }
                 }
