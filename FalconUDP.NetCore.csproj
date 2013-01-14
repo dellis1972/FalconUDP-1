@@ -105,6 +105,9 @@
     <Compile Include="Const.cs" />
     <Compile Include="Delegates.cs" />
     <Compile Include="Enums.cs" />
+    <Compile Include="FalconEndPoint.cs">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="FalconListen.cs" />
     <Compile Include="FalconPeer.cs" />
     <Compile Include="Packet.cs" />

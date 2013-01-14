@@ -2,14 +2,54 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
-using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+#if NETFX_CORE
+using Windows.Networking;
+using Windows.Networking.Sockets;
+#else
+using System.Net.Sockets;
+#endif
+
 
 namespace FalconUDP
 {
     public partial class FalconPeer
     {
+
+#if NETFX_CORE
+
+        private void MessageReceived(DatagramSocket sender, DatagramSocketMessageReceivedEventArgs args)
+        {
+            if(args.RemoteAddress.Type != HostNameType.Ipv4)
+            {
+                // TODO support other types once the rest of Falcon does
+                Log(LogLevel.Warning, String.Format("Dropped Message - Remote peer: {0} unsupported type: {1}.", args.RemoteAddress.RawName, args.RemoteAddress.Type));
+                return;
+            }
+
+            FalconEndPoint fep = new FalconEndPoint(args.RemoteAddress.RawName, args.RemotePort);
+
+            RemotePeer rp;
+            if (!peersByIp.TryGetValue(fep, out rp))
+            {
+
+            }
+            else
+            {
+                // NETFX_CORE insists messages are received asynchoronously so we are going to have to 
+                // lock the RemotePeer message is for as we can't have more than one message being 
+                // added with all the class level sequence counters and so on being used.
+
+                lock (rp)
+                {
+ 
+                }
+            }
+        }
+
+#else
+
         private void Listen()
         {
             while (true)
@@ -112,5 +152,6 @@ namespace FalconUDP
                 }
             }
         }
-    }
+#endif
+    }  
 }

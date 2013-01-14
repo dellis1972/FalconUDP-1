@@ -4,15 +4,15 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 #if NETFX_CORE
+using System.Threading.Tasks;
 using Windows.Foundation;
 using Windows.Networking;
 using Windows.Networking.Sockets;
-using System.Threading.Tasks;
+using Windows.System.Threading;
 #else
 using System.Net.Sockets;
 using System.Threading;
 #endif
-
 
 /***************************************************
  * 
@@ -56,7 +56,8 @@ namespace FalconUDP
 
 #if NETFX_CORE
         internal DatagramSocket Sock;
-        private Dictionary<HostName, RemotePeer> peersByIp;     // same RemotePeers as peersById
+        private Dictionary<FalconEndPoint, RemotePeer> peersByIp;     // same RemotePeers as peersById
+        private ThreadPoolTimer ackCheckTimer;
 #else   
         internal Socket Sock;
                                                         
@@ -142,16 +143,14 @@ namespace FalconUDP
                 Log(LogLevel.Info, "Initialized");
             }
         }
+
 #if NETFX_CORE
         /// <summary>
         /// Start her up!</summary>
         public async Task<TryResult> TryStart()
         {
             stop = false;
-
-            // Create a new socket when starting as only way to stop blocking ReceiveFrom call 
-            // when stopping is closing the existing socket.
-
+            
             Sock = new DatagramSocket();
             Sock.MessageReceived += MessageReceived;
 
@@ -161,33 +160,54 @@ namespace FalconUDP
             }
             catch (Exception ex)
             {
-                // This seems like a fucking retarded way of doing things, we arn't even told
-                // what exceptions could be thrown! But it is what the offical sample does: 
+                // This feels like a very sloppy way of doing things, we arn't even told
+                // what exceptions could be thrown! (We know at least the address could be in use)
+                // This is what the offical sample does: 
                 // http://code.msdn.microsoft.com/windowsapps/DatagramSocket-sample-76a7d82b/sourcecode?fileId=57971&pathId=589460989
 
                 return new TryResult(ex);
             }
             
-            ackCheckTimer = new Timer(ACKCheckTick, null, Settings.ACKTickTime, Settings.ACKTickTime);
-
-            try
-            {
-                listenThread.Start();
-            }
-            catch (ThreadStateException tse)
-            {
-                // e.g. user application called start when already started!
-                return new TryResult(tse);
-            }
+            ackCheckTimer = ThreadPoolTimer.CreatePeriodicTimer(ACKCheckTick, new TimeSpan(0, 0, 0, 0, Settings.ACKTickTime));
 
             Log(LogLevel.Info, String.Format("Started, listening on port: {0}", this.localPort));
 
             return TryResult.SuccessResult;
         }
 
-        private void MessageReceived(DatagramSocket sender, DatagramSocketMessageReceivedEventArgs args)
+        /// <summary>
+        /// Stops Falcon, will stop listening and be unable send. Connected remote peers will be 
+        /// lost. To start Falcon again call Start() again.</summary>
+        public void Stop()
         {
-            throw new NotImplementedException();
+            stop = true;
+
+            try
+            {
+                Sock.Dispose(); // TODO not sure if could throw exception
+            }
+            catch { }
+
+            try
+            {
+                listenThread.Join(Settings.JoinListenThreadTimeout);
+            }
+            catch
+            {
+                try
+                {
+                    listenThread.Abort();
+                }
+                catch { }
+            }
+
+            Sock = null;
+            peersById.Clear();
+            peersByIp.Clear();
+            ackCheckTimer.Cancel();
+            // TODO should we clear events?
+
+            Log(LogLevel.Info, "Stopped");
         }
 #else
         /// <summary>
@@ -227,7 +247,7 @@ namespace FalconUDP
 
             return TryResult.SuccessResult;
         }
-#endif
+
         /// <summary>
         /// Stops Falcon, will stop listening and be unable send. Connected remote peers will be 
         /// lost. To start Falcon again call Start() again.</summary>
@@ -262,6 +282,8 @@ namespace FalconUDP
 
             Log(LogLevel.Info, "Stopped");
         }
+#endif
+
 
         /// <summary>
         /// Attempts to connect to the remote peer. If successful Falcon can send and receive from 
@@ -455,7 +477,7 @@ namespace FalconUDP
         {
             int count = 0;
 
-            lock (peersByIp)
+            lock (peersLockObject)
             {
                 foreach (RemotePeer rp in peersByIp.Values)
                 {
