@@ -7,6 +7,9 @@ using System.Threading;
 #if NETFX_CORE
 using Windows.Networking;
 using Windows.Networking.Sockets;
+using Windows.Storage.Streams;
+using System.Threading.Tasks;
+using Windows.Networking.Connectivity;
 #else
 using System.Net.Sockets;
 #endif
@@ -27,23 +30,89 @@ namespace FalconUDP
                 Log(LogLevel.Warning, String.Format("Dropped Message - Remote peer: {0} unsupported type: {1}.", args.RemoteAddress.RawName, args.RemoteAddress.Type));
                 return;
             }
+            
+            // TODO drop if from loopback and same port
 
             FalconEndPoint fep = new FalconEndPoint(args.RemoteAddress.RawName, args.RemotePort);
 
-            RemotePeer rp;
-            if (!peersByIp.TryGetValue(fep, out rp))
-            {
+            // NETFX_CORE insists messages are received asynchoronously so we are going to 
+            // have to lock the receiveBuffer while the message is being added - we can't have 
+            // more than one message being added when another message arrives and overwrites 
+            // the buffer, even then, if it were for the same peer - threads will contend for all 
+            // the class level sequence counters &c. being used!
 
-            }
-            else
+            lock (receiveBuffer)
             {
-                // NETFX_CORE insists messages are received asynchoronously so we are going to have to 
-                // lock the RemotePeer message is for as we can't have more than one message being 
-                // added with all the class level sequence counters and so on being used.
+                DataReader dr = args.GetDataReader();
+                int sizeReceived = (int)dr.UnconsumedBufferLength;
 
-                lock (rp)
+                if (sizeReceived == 0)
                 {
- 
+                    // peer has closed 
+                    TryRemovePeer(fep);
+                    return;
+                }
+
+                dr.ReadBytes(receiveBuffer);
+
+                RemotePeer rp;
+                if (!peersByIp.TryGetValue(fep, out rp))
+                {
+                    // Could be the peer has not been added yet and is requesting to be added. 
+                    // Or it could be we are asking to be added and peer is accepting!
+
+                    if (sizeReceived >= Const.NORMAL_HEADER_SIZE && receiveBuffer[1] == Const.JOIN_PACKET_INFO)
+                    {
+                        string pass = null;
+                        byte payloadSize = receiveBuffer[2];
+                        if (payloadSize > 0)
+                            pass = Settings.TextEncoding.GetString(receiveBuffer, Const.NORMAL_HEADER_SIZE, payloadSize);
+
+                        if (pass != networkPass) // TODO something else?
+                        {
+                            // TODO send reject and reason
+                            Log(LogLevel.Info, String.Format("Join request from: {0} dropped, bad pass.", fep));
+                        }
+                        else if (peersByIp.ContainsKey(fep))
+                        {
+                            // TODO send reject and reason
+                            Log(LogLevel.Warning, String.Format("Cannot add peer again: {0}, peer is already added!", fep));
+                        }
+                        else
+                        {
+                            rp = AddPeer(fep);
+                            rp.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null);
+                        }
+                    }
+                    else if (sizeReceived >= Const.NORMAL_HEADER_SIZE && (receiveBuffer[1] & (byte)PacketType.AcceptJoin) == (byte)PacketType.AcceptJoin)
+                    {
+                        AwaitingAcceptDetail detail;
+                        if (!TryGetAndRemoveWaitingAcceptDetail(fep, out detail))
+                        {
+                            // Possible reasons we do not have detail are: 
+                            //  1) Accept is too late,
+                            //  2) Accept duplicated and we have already removed it, or
+                            //  3) Accept was unsolicited.
+
+                            Log(LogLevel.Warning, String.Format("Dropped Accept Packet from unknown peer: {0}.", fep));
+                        }
+                        else
+                        {
+                            // create the new peer, add the datagram to send ACK, call the callback
+                            rp = AddPeer(fep);
+                            rp.AddReceivedDatagram(sizeReceived, receiveBuffer);
+                            TryResult tr = new TryResult(true, null, null, rp.Id);
+                            detail.Callback(tr);
+                        }
+                    }
+                    else
+                    {
+                        Log(LogLevel.Warning, String.Format("Datagram dropped - unknown peer: {0}.", fep));
+                    }
+                }
+                else
+                {
+                    rp.AddReceivedDatagram(sizeReceived, receiveBuffer);
                 }
             }
         }

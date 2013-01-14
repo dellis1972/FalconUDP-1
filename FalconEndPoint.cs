@@ -61,6 +61,11 @@ namespace FalconUDP
         {
             return this.hostName.IsEqual(other.hostName) && this.port == other.port; // how are we able to access private fields? (cause we are in the class..)
         }
+
+        public override string ToString()
+        {
+            return String.Format("{0}:{1}", hostName.CanonicalName, portAsString);
+        }
     }
 }
 #endif

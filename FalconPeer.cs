@@ -9,6 +9,7 @@ using Windows.Foundation;
 using Windows.Networking;
 using Windows.Networking.Sockets;
 using Windows.System.Threading;
+using Windows.Storage.Streams;
 #else
 using System.Net.Sockets;
 using System.Threading;
@@ -72,7 +73,6 @@ namespace FalconUDP
         private Dictionary<int, RemotePeer> peersById;          // same RemotePeers as peersByIp
         private object peersLockObject;                         // used to lock when using above peer collections
         private byte[] receiveBuffer;
-        private byte[] sendBuffer;
         private bool stop;
         private string networkPass;
         private LogLevel logLvl; 
@@ -100,7 +100,7 @@ namespace FalconUDP
             this.logLvl = logLevel;
 
 #if NETFX_CORE
-            this.peersByIp = new Dictionary<HostName, RemotePeer>();
+            this.peersByIp = new Dictionary<FalconEndPoint, RemotePeer>();
 #else
             this.peersByIp = new Dictionary<IPEndPoint, RemotePeer>();
 
@@ -117,7 +117,6 @@ namespace FalconUDP
             this.RemotePeersToDrop = new List<RemotePeer>();
 
             this.receiveBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
-            this.sendBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
 
             this.peerIdCount = 0;
 
@@ -145,6 +144,7 @@ namespace FalconUDP
         }
 
 #if NETFX_CORE
+
         /// <summary>
         /// Start her up!</summary>
         public async Task<TryResult> TryStart()
@@ -187,20 +187,7 @@ namespace FalconUDP
                 Sock.Dispose(); // TODO not sure if could throw exception
             }
             catch { }
-
-            try
-            {
-                listenThread.Join(Settings.JoinListenThreadTimeout);
-            }
-            catch
-            {
-                try
-                {
-                    listenThread.Abort();
-                }
-                catch { }
-            }
-
+            
             Sock = null;
             peersById.Clear();
             peersByIp.Clear();
@@ -208,6 +195,76 @@ namespace FalconUDP
             // TODO should we clear events?
 
             Log(LogLevel.Info, "Stopped");
+        }
+
+        /// <summary>
+        /// Attempts to connect to the remote peer. If successful Falcon can send and receive from 
+        /// this peer and TryResult.Tag will be set to the Id for this remote peer which can also 
+        /// be obtained in the PeerAdded event. This Method returns immediatly then calls the callback 
+        /// supplied when the operation completes.</summary>
+        /// <param name="addr">
+        /// IP address of remote peer.</param>
+        /// <param name="callback">
+        /// Callback to call when operation completes.</param>
+        /// <param name="pass">
+        /// Password remote peer requires, if any.</param>
+        public void BeginTryJoinPeer(string addr, int port, TryCallback callback, string pass = null)
+        {
+            if (stop)
+                callback(new TryResult(false, "Falcon is not started!"));
+
+            FalconEndPoint fep = new FalconEndPoint(addr, port.ToString());
+            BeginTryJoinPeer(fep, pass, callback);
+        }
+
+        // called on first attempt
+        private void BeginTryJoinPeer(FalconEndPoint endPoint, string pass, TryCallback callback)
+        {
+            AwaitingAcceptDetail detail = new AwaitingAcceptDetail(endPoint, callback, pass);
+            AddWaitingAcceptDetail(detail);
+            BeginTryJoinPeer(detail);
+        }
+
+        // Called directly when re-sending an AwaitingAcceptDetail already instantiated and in list
+        // or via API on intial attempt after creating AwaitingAcceptDetail.
+        private async void BeginTryJoinPeer(AwaitingAcceptDetail detail)
+        {
+            Windows.Storage.Streams.Buffer sendBuffer;
+
+            int size = 0;
+            if (detail.Pass == null)
+            {
+                sendBuffer = new Windows.Storage.Streams.;
+                sendBuffer.
+                size = Const.NORMAL_HEADER_SIZE;
+            }
+            else
+            {
+                int count = Settings.TextEncoding.GetByteCount(detail.Pass);
+                if (count > Byte.MaxValue)
+                {
+                    RemoveWaitingAcceptDetail(detail);
+                    detail.Callback(new TryResult(false, "pass too long"));
+                    return;
+                }
+
+                sendBuffer = new byte[Const.NORMAL_HEADER_SIZE + count];
+                sendBuffer[2] = (byte)count;
+                Buffer.BlockCopy(Settings.TextEncoding.GetBytes(detail.Pass), 0, sendBuffer, Const.NORMAL_HEADER_SIZE, count);
+                size = Const.NORMAL_HEADER_SIZE + count;
+            }
+
+            Buffer.SetByte(sendBuffer, 0, 0);
+            Buffer.SetByte(sendBuffer, 1, Const.JOIN_PACKET_INFO);
+
+            //------------------------------------------------------------------------------------------------------
+            IOutputStream outStream = await Sock.GetOutputStreamAsync(detail.EndPoint.Address, detail.EndPoint.Port);
+            //------------------------------------------------------------------------------------------------------
+
+            outStream.WriteAsync(
+
+            
+
         }
 #else
         /// <summary>
@@ -282,9 +339,7 @@ namespace FalconUDP
 
             Log(LogLevel.Info, "Stopped");
         }
-#endif
-
-
+        
         /// <summary>
         /// Attempts to connect to the remote peer. If successful Falcon can send and receive from 
         /// this peer. This Method blocks until operation is complete.</summary>
@@ -374,7 +429,7 @@ namespace FalconUDP
 
         // Called directly when re-sending an AwaitingAcceptDetail already instantiated and in list
         // or via API on intial attempt after creating AwaitingAcceptDetail.
-        private void BeginTryJoinPeer(AwaitingAcceptDetail detail)
+        private void BeginTryJoinPeer(AwaitingAcceptDetail detail)        
         {
             lock (sendBuffer) // we could be being called from Timer or application
             {
@@ -432,6 +487,7 @@ namespace FalconUDP
                 }
             }
         }
+#endif
 
         /// <summary>
         /// TODO

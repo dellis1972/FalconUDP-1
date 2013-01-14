@@ -9,13 +9,22 @@ namespace FalconUDP
 {
     class AwaitingAcceptDetail
     {
+#if NETFX_CORE
+        internal FalconEndPoint EndPoint;
+#else
         internal IPEndPoint EndPoint;
+#endif
+
         internal TryCallback Callback;
         internal int Ticks;
         internal string Pass;
         internal int RetryCount;
 
+#if NETFX_CORE
+        internal AwaitingAcceptDetail(FalconEndPoint ip, TryCallback callback, string pass)
+#else
         internal AwaitingAcceptDetail(IPEndPoint ip, TryCallback callback, string pass)
+#endif
         {
             EndPoint = ip;
             Callback = callback;
