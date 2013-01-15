@@ -1,26 +1,32 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Net;
+#if NETFX_CORE
+#else
 using System.Net.Sockets;
+#endif
 
 namespace FalconUDP
 {
     class RemotePeer
     {
-        internal int Id;
+#if NETFX_CORE
+        internal FalconEndPoint EndPoint;
+#else
         internal IPEndPoint EndPoint;
+#endif
+
+        internal int Id;
         internal int PacketCount;                               // number of received packets not yet retrived by application
 
         private FalconPeer localPeer;                           // local peer this remote peers has joined
         private byte sendSeqCount;
-        private int sendActualSeqCount;
-        private int receivedSeqLoopCount;
-        private int receivedSeqMax;
-        private int receivedSeqLoopCutoff;
+        private byte lastReceivedSeq;
+        private int seqOrdinal;
         private int receivedSeqInOrderMax;
         private int readInOrderSeqMax;                          // differs from receivedInOrderMax in that = max actually retrived by application
-        private SortedList<uint, Packet> receivedPackets;       // packets received from this peer not yet retrived by application
-        private SortedList<int, PacketDetail> sentPacketsAwaitingACK;
+        private SortedDictionary<int, Packet> receivedPackets;  // packets received from this peer not yet "read" by application
+        private SortedDictionary<int, PacketDetail> sentPacketsAwaitingACK;
         private List<int> sentPacketsAwaitingACKToRemove;
         private byte[] sendBuffer;                              // buffer recycled for every packet sent to this peer
         private int sendPacketSize;                             // the size of the current packet to be sent in SendBuffer
@@ -31,7 +37,11 @@ namespace FalconUDP
         private bool hasResynchedAndHasPacketsPreSynch;
         private byte[] payloadSizeBytes = new byte[2];          // buffer recycled for headers with payload size as ushort 
 
+#if NETFX_CORE
+        internal RemotePeer(FalconPeer localPeer, int id, FalconEndPoint endPoint)
+#else
         internal RemotePeer(FalconPeer localPeer, int id, IPEndPoint endPoint)
+#endif
         {
             this.Id                     = id;
             this.localPeer              = localPeer;
@@ -40,8 +50,8 @@ namespace FalconUDP
             this.sendBuffer             = new byte[Const.MAX_DATAGRAM_SIZE];
             this.sendPacketSize         = 0;
             this.PacketCount            = 0;
-            this.receivedPackets        = new SortedList<uint, Packet>();
-            this.sentPacketsAwaitingACK = new SortedList<int, PacketDetail>();
+            this.receivedPackets        = new SortedDictionary<int, Packet>();
+            this.sentPacketsAwaitingACK = new SortedDictionary<int, PacketDetail>();
             this.sentPacketsAwaitingACKToRemove = new List<int>();
             this.peerName               = endPoint.ToString();
             this.isResynching           = false;
@@ -119,8 +129,7 @@ namespace FalconUDP
                 }
             }
 
-            sendSeqCount++;         // NOTE: will be reset to 0 if 255
-            sendActualSeqCount++;   // keep track of actual seq num used for ACK's
+            sendSeqCount++;
 
             sendBuffer[0] = sendSeqCount;
             sendBuffer[1] = (byte)((byte)hpst | (byte)opts | (byte)type);
@@ -176,14 +185,14 @@ namespace FalconUDP
             __BeginSend__(sendBuffer, sendPacketSize);
         }
 
-        private void BeginSendACK(int actualSequence)
+        private void BeginSendACK(byte seq)
         {
-            BeginSend(SendOptions.None, PacketType.ACK, BitConverter.GetBytes(actualSequence));
+            BeginSend(SendOptions.None, PacketType.ACK, seq);
         }
 
-        private void BeginSendAntiACK(int actualSequence)
+        private void BeginSendAntiACK(byte seq)
         {
-            BeginSend(SendOptions.None, PacketType.AntiACK, BitConverter.GetBytes(actualSequence));
+            BeginSend(SendOptions.None, PacketType.AntiACK, seq);
         }
 
         private void BeginSend(PacketDetail detail)
@@ -275,41 +284,13 @@ namespace FalconUDP
         private void ResetSequenceCounters()
         {
             sendSeqCount = 0;
-            sendActualSeqCount = 0;
-            receivedSeqLoopCount = 0;
-            receivedSeqMax = 0;
-            receivedSeqLoopCutoff = 0;
+            lastReceivedSeq = 0;
             receivedSeqInOrderMax = 0;
             readInOrderSeqMax = 0;
         }
 
-        internal void AddReceivedDatagram(int size, byte[] buffer)
+        internal void AddReceivedPacket(byte seq, SendOptions opts, PacketType type, byte[] payload)
         {
-            // NOTE: This completes synchoronously so no need to copy buffer.
-
-            if (size < Const.NORMAL_HEADER_SIZE)
-            {
-                localPeer.Log(LogLevel.Error, String.Format("Datagram dropped - size: {0}, less than min header size: {1}.", size, Const.NORMAL_HEADER_SIZE));
-                return;
-            }
-
-            byte seq = buffer[0];
-
-            // parse packet info byte
-            HeaderPayloadSizeType hpst  = (HeaderPayloadSizeType)(buffer[1] & Const.PAYLOAD_SIZE_TYPE_MASK);
-            SendOptions opts            = (SendOptions)(buffer[1] & Const.SEND_OPTS_MASK);
-            PacketType type             = (PacketType)(buffer[1] & Const.PACKET_TYPE_MASK);
-
-            // check the header makes sense
-            if (!Enum.IsDefined(Const.HEADER_PAYLOAD_SIZE_TYPE_TYPE, hpst)
-                || !Enum.IsDefined(Const.SEND_OPTIONS_TYPE, opts)
-                || !Enum.IsDefined(Const.PACKET_TYPE_TYPE, type))
-            {
-                localPeer.Log(LogLevel.Warning, String.Format("Dropped packet from peer: {0}, bad header.", peerName));
-                return;
-            }
-
-            // zero sized packets that don't require ACK
             switch (type)
             {
                 case PacketType.Ping:
@@ -329,231 +310,147 @@ namespace FalconUDP
 
                         return;
                     }
-            }
-
-            // parse payload size
-            int payloadSize, payloadStartIndex;
-            if (hpst == HeaderPayloadSizeType.Byte)
-            {
-                payloadSize = buffer[2];
-                payloadStartIndex = Const.NORMAL_HEADER_SIZE;
-            }
-            else
-            {
-                if (size < Const.LARGE_HEADER_SIZE)
-                {
-                    localPeer.Log(LogLevel.Error, String.Format("Datagram with large header specified dropped - size: {0}, less than large header size: {1}.", size, Const.LARGE_HEADER_SIZE));
-                    return;
-                }
-
-
-                Buffer.BlockCopy(buffer, 2, payloadSizeBytes, 0, 2);
-                payloadSize = BitConverter.ToUInt16(payloadSizeBytes, 0);
-                payloadStartIndex = Const.LARGE_HEADER_SIZE;
-            }
-
-
-            if (type == PacketType.ACK || type == PacketType.AntiACK)
-            {
-                int actualSeqACKFor = BitConverter.ToInt32(buffer, payloadStartIndex);
-
-                lock (sentPacketsAwaitingACK)   // ACK Tick also uses this collection
-                {
-                    PacketDetail detail;
-                    if (!sentPacketsAwaitingACK.TryGetValue(actualSeqACKFor, out detail))
+                case PacketType.ACK:
+                case PacketType.AntiACK:
                     {
-                        // ACK has arrived too late and the packet must have already been removed.
-                        localPeer.Log(LogLevel.Warning, "Packet for ACK not found - must be too late."); // TODO packet summary
-                        return;
-                    }
+                        if (payload.Length != Const.SIZE_OF_SEQ)
+                        {
+                            localPeer.Log(LogLevel.Error, String.Format("ACK or AntiACK packet dropped from peer: {0}, bad payload size: {1}, expected: {2}.", peerName, payload.Length, Const.SIZE_OF_SEQ));
+                            return;
+                        }
 
-                    if (type == PacketType.ACK)
-                    {
-                        // call the callback awaiting ACK, if any
-                        if (detail.ACKCallback != null)
-                            detail.ACKCallback();
+                        byte seqACKFor = payload[0];
 
-                        // remove detail of packet that was awaiting ACK
-                        sentPacketsAwaitingACK.Remove(actualSeqACKFor);
-                    }
-                    else // must be AntiACK
-                    {
-                        // Re-send the unACKnowledged packet right away NOTE: we are not 
-                        // incrementing resent count, we are resetting it, because the remote peer 
-                        // must be alive to have sent the AntiACK.
-
-                        detail.ACKTicks = 0;
-                        detail.ResentCount = 0;
-                        BeginSend(detail);
-                    }
-                }
-            }
-            else
-            {
-                // Further processing common to rest of packet types done in seperate function 
-                // only for sake of neatness.
-
-                int actualSeq;
-                bool success = FurtherProcessPacket(seq, opts, out actualSeq);
-
-                if (success)
-                {
-                    switch (type)
-                    {
-                        case PacketType.Application:
+                        lock (sentPacketsAwaitingACK)   // ACK Tick also uses this collection
+                        {
+                            PacketDetail detail;
+                            if (!sentPacketsAwaitingACK.TryGetValue(seqACKFor, out detail))
                             {
-                                // copy packet's payload to list of received for reading by the application
+                                // ACK has arrived too late and the packet must have already been removed.
+                                localPeer.Log(LogLevel.Warning, "Packet for ACK not found - must be too late.");
+                                return;
+                            }
 
-                                byte[] payload = new byte[payloadSize];
-                                Buffer.BlockCopy(buffer, payloadStartIndex, payload, 0, payload.Length);
+                            if (type == PacketType.ACK)
+                            {
+                                // call the callback awaiting ACK, if any
+                                if (detail.ACKCallback != null)
+                                    detail.ACKCallback();
 
-                                lock (receivedPackets) // collection also used by application
+                                // remove detail of packet that was awaiting ACK
+                                sentPacketsAwaitingACK.Remove(seqACKFor);
+                            }
+                            else // must be AntiACK
+                            {
+                                // Re-send the unACKnowledged packet right away NOTE: we are not 
+                                // incrementing resent count, we are resetting it, because the remote peer 
+                                // must be alive to have sent the AntiACK.
+
+                                detail.ACKTicks = 0;
+                                detail.ResentCount = 0;
+                                BeginSend(detail);
+                            }
+                        }
+                    }
+                    break;
+                default:
+                    {
+                        // validate seq
+                        byte max = (byte)(lastReceivedSeq + Settings.OutOfOrderTolerance);
+                        byte min = (byte)(lastReceivedSeq - Settings.OutOfOrderTolerance);
+                        if (max < min) // possible if exceeded Byte.MaxValue and wrapped around
+                        {
+                            byte tmp = max;
+                            max = min;
+                            min = tmp;
+                        }
+
+                        if (seq > max)
+                        {
+                            localPeer.Log(LogLevel.Warning, String.Format("Out-of-order packet dropped, out-of-order from current max received by: {0}.", seq - max));
+                            return;
+                        }
+                        else if (seq < min)
+                        {
+                            localPeer.Log(LogLevel.Warning, String.Format("Out-of-order packet dropped, out-of-order from current max received by: {0}.", min - seq));
+                            return;
+                        }
+
+                        lastReceivedSeq = seq;
+
+                        bool reqReliable = (opts & SendOptions.Reliable) == SendOptions.Reliable;
+
+                        // If packet requries ACK - send it!
+                        if (reqReliable)
+                        {
+                            BeginSendACK(seq);
+                        }
+
+                        // TODO needs to be changed now that we have changed out sequencing algorithim..
+                        // If packet required to be in order check it is after the max seq already read by
+                        // application, otherwise drop it - in which case if required to be reliable notify
+                        // peer packet was dropped so does not neccasirly have to wait until ACK_TIMEOUT to 
+                        // determine packet was dropped (it will wait only the minima of the two).
+                        //
+                        //if ((opts & SendOptions.InOrder) == SendOptions.InOrder)
+                        //{
+                        //    if (seq < readInOrderSeqMax)
+                        //    {
+                        //        if (reqReliable)
+                        //            BeginSendAntiACK(seq);
+                        //        return;
+                        //    }
+                        //    else
+                        //    {
+                        //        receivedSeqInOrderMax = actualSeq;
+                        //    }
+                        //}
+
+                        switch (type)
+                        {
+                            case PacketType.Application:
                                 {
-                                    uint acutalSeqOrdinal = (uint)actualSeq;
+                                    // add payload to list of received for reading by the application
 
-                                    if (hasResynchedAndHasPacketsPreSynch)
+                                    lock (receivedPackets) // collection also used by application
                                     {
-                                        // Re-synch has recently occured and application has 
-                                        // not yet read packets from before the re-synch. So 
-                                        // add to max actual seq num to actual seq num to sort
-                                        // packet correctly.
+                                        // validate we don't already have a packet with same seq!
+                                        if (receivedPackets.ContainsKey(acutalSeqOrdinal))
+                                        {
+                                            // Possible reasons are:
+                                            // 1) receivedPackets has not been read for a while and seq has looped
+                                            // 2) datagram duplicated
+                                            // 3) packet is way out-of-order such that is passed out-of-order validation
 
-                                        acutalSeqOrdinal += Int32.MaxValue;
-                                    }
-
-                                    // validate we don't already have a packet with same seq!
-                                    if (receivedPackets.ContainsKey(acutalSeqOrdinal))
-                                    {
-                                        // Either packet it out-of-order by a multiple of 
-                                        // MAX_SEQ_NUMS or duplicated.
-
-                                        localPeer.Log(LogLevel.Warning, String.Format("Dropped packet from {0}, duplicate seq.", peerName));
-                                    }
-                                    else
-                                    {
-                                        receivedPackets.Add(acutalSeqOrdinal, new Packet(Id, acutalSeqOrdinal, payload));
-                                        PacketCount++;
+                                            localPeer.Log(LogLevel.Warning, String.Format("Dropped packet from {0}, duplicate seq.", peerName));
+                                        }
+                                        else
+                                        {
+                                            receivedPackets.Add(seq, new Packet(Id, acutalSeqOrdinal, payload));
+                                            PacketCount++;
+                                        }
                                     }
                                 }
-                            }
-                            break;
-                        case PacketType.AcceptJoin:
-                            {
-                                // nothing else to do..
-                            }
-                            break;
-                        case PacketType.Resynch:
-                            {
-                                ResetSequenceCounters();
-
-                                lock (receivedPackets) // collection also used by application
+                                break;
+                            case PacketType.AcceptJoin:
                                 {
-                                    hasResynchedAndHasPacketsPreSynch = receivedPackets.Count > 0;
+                                    // nothing else to do..
                                 }
-                            }
-                            break;
+                                break;
+                            case PacketType.Resynch:
+                                {
+                                    ResetSequenceCounters();
+
+                                    lock (receivedPackets) // collection also used by application
+                                    {
+                                        hasResynchedAndHasPacketsPreSynch = receivedPackets.Count > 0;
+                                    }
+                                }
+                                break;
+                        }
                     }
-                }
+                    break;
             }
-        }
-
-        private bool FurtherProcessPacket(byte seq, SendOptions opts, out int actualSeq)
-        {
-            // Calculate the actual sequence number of the packet by adding the number of possible 
-            // sequence numbers in a loop (MAX_SEQ_NUMS which is equal to MAX_SEQ_NUM + 1) times 
-            // the number loops since we started.
-
-            // A trailing cutoff point follows the maximum actual sequence number received by half 
-            // the number of sequence numbers (HALF_MAX_SEQ_NUMS) in a loop. A packet with a seq 
-            // less than this is assumed to be from the next loop so in such cases add the number 
-            // of sequence numbers in a loop to the actual sequence num. The variable tracking the 
-            // number of loops since we started is only incremented when the trailing cutoff point 
-            // divided by the number of numbers in a loop passes the current value of the varible.
-
-            // At this point we are tolerant of out-of-order packets to a magnitude + or - half 
-            // the number of possible sequence numbers. Should a packet be out-of-order by more than 
-            // this it will be given an erroneous actual seq num. Reduce this possibility further 
-            // by checking actual seq num in a range (less than half the number of possible seq 
-            // numbers) + or - the current actual max seq num received. However even in the most 
-            // extreme case - setting this range to 0 - we can only be tolerant of out-of-order 
-            // within + or - MAX_SEQ_NUMS, i.e. one loop.
-
-            actualSeq = seq + (Const.MAX_SEQ_NUMS * receivedSeqLoopCount);
-
-            bool reqReliable = (opts & SendOptions.Reliable) == SendOptions.Reliable;
-
-            if (actualSeq < receivedSeqLoopCutoff)
-            {
-                // ASSUMPTION: We must be in the next loop and not have incremented seqLoopCount 
-                //             yet, or out-of-order to the extent validation will drop it, or 
-                //             out-of-order to the extent we cannot tell we are out-of-order!
-
-                actualSeq += Const.MAX_SEQ_NUMS;
-            }
-            else
-            {
-                // validate not too low
-                if (actualSeq < (receivedSeqMax - Settings.OUT_OF_ORDER_TOLERANCE))
-                {
-                    if (reqReliable)
-                        BeginSendAntiACK(actualSeq);
-                    localPeer.Log(LogLevel.Warning, String.Format("Dropped packet too late from {0}.", peerName));
-                    return false;
-                }
-            }
-
-            if (actualSeq > receivedSeqMax)
-            {
-                // validate not too high
-                if (actualSeq > (receivedSeqInOrderMax + Settings.OUT_OF_ORDER_TOLERANCE))
-                {
-                    // A packet is never too early! (Though it can be too late - they are not 
-                    // wizards you know). So it must be have erroneously thought to be from the 
-                    // next loop.
-
-                    if (reqReliable)
-                        BeginSendAntiACK(actualSeq);
-                    localPeer.Log(LogLevel.Warning, String.Format("Dropped packet too early from {0}.", peerName));
-                    return false;
-                }
-
-                // update the max seq received and the trailing cutoff point
-                receivedSeqMax = actualSeq;
-                receivedSeqLoopCutoff = receivedSeqMax - Const.HALF_MAX_SEQ_NUMS;
-
-
-                // update the loop count if cutoff / MAX_SEQ is greater than it
-                int minLoopCount = receivedSeqLoopCutoff / Const.MAX_SEQ_NUMS;
-                if (minLoopCount > receivedSeqLoopCount)
-                    receivedSeqLoopCount = minLoopCount;
-            }
-
-            // If packet required to be in order check it is after the max seq already read by
-            // application, otherwise drop it - in which case if required to be reliable notify
-            // peer packet was dropped so does not neccasirly have to wait until ACK_TIMEOUT to 
-            // determine packet was dropped (it will wait only the minima of the two).
-
-            if ((opts & SendOptions.InOrder) == SendOptions.InOrder)
-            {
-                if (actualSeq < readInOrderSeqMax)
-                {
-                    if (reqReliable)
-                        BeginSendAntiACK(actualSeq);
-                    return false;
-                }
-                else
-                {
-                    receivedSeqInOrderMax = actualSeq;
-                }
-            }
-
-            // If packet requries ACK - send it!
-            if (reqReliable)
-            {
-                BeginSendACK(actualSeq);
-            }
-
-            return true;
         }
 
         internal IList<Packet> Read()
@@ -575,7 +472,7 @@ namespace FalconUDP
 
                 IList<Packet> ps = receivedPackets.Values;
 
-                receivedPackets = new SortedList<uint, Packet>();
+                receivedPackets = new SortedDictionary<uint, Packet>();
 
                 return ps;
             }

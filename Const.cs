@@ -14,6 +14,7 @@ namespace FalconUDP
         internal const int MAX_DATAGRAM_SIZE                    = 65507;                            // this is an IPv4 limit, v6 allows slightly more but we needn't
         internal const uint UMAX_DATAGRAM_SIZE                  = 65507;                            // NETFX_CORE uses uint's
 
+        internal const int SIZE_OF_SEQ                          = sizeof(byte);
         internal const byte MAX_SEQ                             = Byte.MaxValue;
         internal const int MAX_SEQ_NUMS                         = MAX_SEQ + 1;                      // + 1 to include "0"
         internal const int HALF_MAX_SEQ_NUMS                    = MAX_SEQ_NUMS / 2;

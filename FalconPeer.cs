@@ -59,6 +59,9 @@ namespace FalconUDP
         internal DatagramSocket Sock;
         private Dictionary<FalconEndPoint, RemotePeer> peersByIp;     // same RemotePeers as peersById
         private ThreadPoolTimer ackCheckTimer;
+        private FalconEndPoint lastRemoteEndPoint;              // end point data last received from
+        private string localPortAsString;
+        private Object processingMessageLock;
 #else   
         internal Socket Sock;
                                                         
@@ -67,12 +70,12 @@ namespace FalconUDP
         private EndPoint lastRemoteEndPoint;                    // end point data last received from
         private Thread listenThread;
         private Timer ackCheckTimer;                            // also used for AwaitingAcceptDetail
+        private byte[] receiveBuffer;
 #endif
         internal List<RemotePeer> RemotePeersToDrop;            // only ACKCheckTick() uses this 
         private int localPort;
         private Dictionary<int, RemotePeer> peersById;          // same RemotePeers as peersByIp
         private object peersLockObject;                         // used to lock when using above peer collections
-        private byte[] receiveBuffer;
         private bool stop;
         private string networkPass;
         private LogLevel logLvl; 
@@ -100,7 +103,9 @@ namespace FalconUDP
             this.logLvl = logLevel;
 
 #if NETFX_CORE
+            this.localPortAsString = this.localPort.ToString();
             this.peersByIp = new Dictionary<FalconEndPoint, RemotePeer>();
+            this.processingMessageLock = new Object();
 #else
             this.peersByIp = new Dictionary<IPEndPoint, RemotePeer>();
 
@@ -147,7 +152,7 @@ namespace FalconUDP
 
         /// <summary>
         /// Start her up!</summary>
-        public async Task<TryResult> TryStart()
+        public async Task<TryResult> TryStartAsync()
         {
             stop = false;
             
@@ -160,12 +165,19 @@ namespace FalconUDP
             }
             catch (Exception ex)
             {
-                // This feels like a very sloppy way of doing things, we arn't even told
+                // This feels like a pretty sloppy way of doing things, we arn't even told
                 // what exceptions could be thrown! (We know at least the address could be in use)
                 // This is what the offical sample does: 
                 // http://code.msdn.microsoft.com/windowsapps/DatagramSocket-sample-76a7d82b/sourcecode?fileId=57971&pathId=589460989
 
-                return new TryResult(ex);
+                switch(SocketError.GetStatus(ex.HResult))
+                {
+                    case SocketErrorStatus.AddressAlreadyInUse:
+                    default:
+                        {
+                            return new TryResult(ex);
+                        }
+                }
             }
             
             ackCheckTimer = ThreadPoolTimer.CreatePeriodicTimer(ACKCheckTick, new TimeSpan(0, 0, 0, 0, Settings.ACKTickTime));
@@ -208,35 +220,37 @@ namespace FalconUDP
         /// Callback to call when operation completes.</param>
         /// <param name="pass">
         /// Password remote peer requires, if any.</param>
-        public void BeginTryJoinPeer(string addr, int port, TryCallback callback, string pass = null)
+        public void BeginJoinPeer(string addr, int port, TryCallback callback, string pass = null)
         {
             if (stop)
                 callback(new TryResult(false, "Falcon is not started!"));
 
             FalconEndPoint fep = new FalconEndPoint(addr, port.ToString());
-            BeginTryJoinPeer(fep, pass, callback);
+            BeginJoinPeer(fep, callback, pass);
         }
 
         // called on first attempt
-        private void BeginTryJoinPeer(FalconEndPoint endPoint, string pass, TryCallback callback)
+        private void BeginJoinPeer(FalconEndPoint endPoint, TryCallback callback, string pass)
         {
             AwaitingAcceptDetail detail = new AwaitingAcceptDetail(endPoint, callback, pass);
             AddWaitingAcceptDetail(detail);
-            BeginTryJoinPeer(detail);
+            BeginJoinPeer(detail);
         }
 
         // Called directly when re-sending an AwaitingAcceptDetail already instantiated and in list
         // or via API on intial attempt after creating AwaitingAcceptDetail.
-        private async void BeginTryJoinPeer(AwaitingAcceptDetail detail)
+        private void BeginJoinPeer(AwaitingAcceptDetail detail)
         {
-            Windows.Storage.Streams.Buffer sendBuffer;
+            // This is not thread-safe - if Sock.OutputStream is used before we are finished with 
+            // it.
 
-            int size = 0;
+            DataWriter dw = new DataWriter(Sock.OutputStream); 
+            dw.WriteByte(0);
+            dw.WriteByte(Const.JOIN_PACKET_INFO);
+
             if (detail.Pass == null)
             {
-                sendBuffer = new Windows.Storage.Streams.;
-                sendBuffer.
-                size = Const.NORMAL_HEADER_SIZE;
+                dw.WriteByte(0);
             }
             else
             {
@@ -245,26 +259,25 @@ namespace FalconUDP
                 {
                     RemoveWaitingAcceptDetail(detail);
                     detail.Callback(new TryResult(false, "pass too long"));
-                    return;
                 }
 
-                sendBuffer = new byte[Const.NORMAL_HEADER_SIZE + count];
-                sendBuffer[2] = (byte)count;
-                Buffer.BlockCopy(Settings.TextEncoding.GetBytes(detail.Pass), 0, sendBuffer, Const.NORMAL_HEADER_SIZE, count);
-                size = Const.NORMAL_HEADER_SIZE + count;
+                dw.WriteByte((byte)count);
+                dw.WriteBytes(Settings.TextEncoding.GetBytes(detail.Pass));
             }
 
-            Buffer.SetByte(sendBuffer, 0, 0);
-            Buffer.SetByte(sendBuffer, 1, Const.JOIN_PACKET_INFO);
+            try
+            {
+                // We dont want to await it cause then have to make method async which is not 
+                // neccessary cause there is nothing to return, god know what happens to the 
+                // exception handler now...
 
-            //------------------------------------------------------------------------------------------------------
-            IOutputStream outStream = await Sock.GetOutputStreamAsync(detail.EndPoint.Address, detail.EndPoint.Port);
-            //------------------------------------------------------------------------------------------------------
-
-            outStream.WriteAsync(
-
-            
-
+                dw.StoreAsync(); 
+            }
+            catch (Exception ex) // ASSUMING: StoreAsync() could throw an exception, but who knows...
+            {
+                RemoveWaitingAcceptDetail(detail);
+                detail.Callback(new TryResult(ex));
+            }
         }
 #else
         /// <summary>
@@ -579,7 +592,12 @@ namespace FalconUDP
                 PongReceived(rp.Id);
         }
 
+#if NETFX_CORE
+        private void BeginSendTo(FalconEndPoint endPoint, SendOptions opts, PacketType type, byte[] payload)
+#else
         private void BeginSendTo(IPEndPoint endPoint, SendOptions opts, PacketType type, byte[] payload)
+#endif
+        
         {
             RemotePeer rp;
             if (!peersByIp.TryGetValue(endPoint, out rp))
@@ -634,7 +652,7 @@ namespace FalconUDP
                             else
                             {
                                 // try again
-                                BeginTryJoinPeer(aad);
+                                BeginJoinPeer(aad);
                             }
                         }
                     }
@@ -650,16 +668,19 @@ namespace FalconUDP
                 }
             }
         }
-        
-        internal RemotePeer AddPeer(IPEndPoint ip)
+#if NETFX_CORE
+        internal RemotePeer AddPeer(FalconEndPoint ep)
+#else
+        internal RemotePeer AddPeer(IPEndPoint ep)
+#endif
         {
             lock (peersLockObject) // application can use the peer collections e.g. SendToAll()
             {
                 peerIdCount++;
 
-                RemotePeer rp = new RemotePeer(this, peerIdCount, ip);
+                RemotePeer rp = new RemotePeer(this, peerIdCount, ep);
                 peersById.Add(peerIdCount, rp);
-                peersByIp.Add(ip, rp);
+                peersByIp.Add(ep, rp);
 
                 // raise peer added event 
                 if (PeerAdded != null)
@@ -669,19 +690,23 @@ namespace FalconUDP
             }
         }
 
+#if NETFX_CORE
+        private void TryRemovePeer(FalconEndPoint ep)
+#else
         private void TryRemovePeer(IPEndPoint ip)
+#endif
         {
             RemotePeer rp;
             lock (peersLockObject) // application can use this collection e.g. SendToAll()
             {
-                if (!peersByIp.TryGetValue(ip, out rp))
+                if (!peersByIp.TryGetValue(ep, out rp))
                 {
-                    Log(LogLevel.Error, String.Format("Failed to remove peer: {0}, peer unknown.", ip));
+                    Log(LogLevel.Error, String.Format("Failed to remove peer: {0}, peer unknown.", ep));
                 }
                 else
                 {
                     peersById.Remove(rp.Id);
-                    peersByIp.Remove(ip);
+                    peersByIp.Remove(ep);
                 }
             }
 
@@ -721,12 +746,16 @@ namespace FalconUDP
             }
         }
 
-        private bool TryGetAndRemoveWaitingAcceptDetail(IPEndPoint ip, out AwaitingAcceptDetail detail)
+#if NETFX_CORE
+        private bool TryGetAndRemoveWaitingAcceptDetail(FalconEndPoint ep, out AwaitingAcceptDetail detail)
+#else
+        private bool TryGetAndRemoveWaitingAcceptDetail(IPEndPoint ep, out AwaitingAcceptDetail detail)
+#endif
         {
             bool found = false;
             lock (awaitingAcceptDetails)
             {
-                detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.Address.Equals(ip.Address) && aad.EndPoint.Port == ip.Port);
+                detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.Address.Equals(ep.Address) && aad.EndPoint.Port == ep.Port);
                 if (detail != null)
                 {
                     found = true;

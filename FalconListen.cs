@@ -31,88 +31,151 @@ namespace FalconUDP
                 return;
             }
             
-            // TODO drop if from loopback and same port
-
-            FalconEndPoint fep = new FalconEndPoint(args.RemoteAddress.RawName, args.RemotePort);
-
+            if(args.RemoteAddress.RawName.StartsWith("127.") && args.RemotePort == localPortAsString)
+            {
+                Log(LogLevel.Warning, "Dropped Message received from self.");
+                return;
+            }
+            
             // NETFX_CORE insists messages are received asynchoronously so we are going to 
             // have to lock the receiveBuffer while the message is being added - we can't have 
             // more than one message being added when another message arrives and overwrites 
             // the buffer, even then, if it were for the same peer - threads will contend for all 
             // the class level sequence counters &c. being used!
 
-            lock (receiveBuffer)
-            {
-                DataReader dr = args.GetDataReader();
-                int sizeReceived = (int)dr.UnconsumedBufferLength;
+            // THOUGHTS: Perhaps MessageReceived is not raised concurrently with another invocation
+            //           - otherwise how does DatagramSocket not overwrite its internal buffer? It 
+            //           could have multiple buffers so we have to presume it could be raised 
+            //           concurrently... 
+            // http://social.msdn.microsoft.com/Forums/en-US/winappswithcsharp/thread/e3701b43-2f09-4059-9b82-d7405a0ffdc8
 
-                if (sizeReceived == 0)
+            lock (processingMessageLock)
+            {
+                lastRemoteEndPoint = new FalconEndPoint(args.RemoteAddress.RawName, args.RemotePort); // careful todo this within the lock so doesn't get re-assigned while we are using it
+                
+                DataReader dr = args.GetDataReader();  
+                int size = (int)dr.UnconsumedBufferLength;
+
+                if (size == 0)
                 {
                     // peer has closed 
-                    TryRemovePeer(fep);
+                    TryRemovePeer(lastRemoteEndPoint);
+                    return;
+                }
+                else if (size < Const.NORMAL_HEADER_SIZE || size > Const.MAX_DATAGRAM_SIZE)
+                {
+                    Log(LogLevel.Error, String.Format("Message dropped from peer: {0}, bad size: {0}", lastRemoteEndPoint, size));
                     return;
                 }
 
-                dr.ReadBytes(receiveBuffer);
+                byte seq = dr.ReadByte();
+                byte packetInfo = dr.ReadByte();
+
+                // parse packet info byte
+                HeaderPayloadSizeType hpst  = (HeaderPayloadSizeType)(packetInfo & Const.PAYLOAD_SIZE_TYPE_MASK);
+                SendOptions opts            = (SendOptions)(packetInfo & Const.SEND_OPTS_MASK);
+                PacketType type             = (PacketType)(packetInfo & Const.PACKET_TYPE_MASK);
+
+                // check the header makes sense
+                if (!Enum.IsDefined(Const.HEADER_PAYLOAD_SIZE_TYPE_TYPE, hpst)
+                    || !Enum.IsDefined(Const.SEND_OPTIONS_TYPE, opts)
+                    || !Enum.IsDefined(Const.PACKET_TYPE_TYPE, type))
+                {
+                    Log(LogLevel.Warning, String.Format("Message dropped from peer: {0}, bad header.", lastRemoteEndPoint));
+                    return;
+                }
+
+                // parse payload size
+                int payloadSize;
+                if (hpst == HeaderPayloadSizeType.Byte)
+                {
+                    payloadSize = dr.ReadByte();
+                }
+                else
+                {
+                    if (size < Const.LARGE_HEADER_SIZE)
+                    {
+                        Log(LogLevel.Error, String.Format("Message with large header dropped from peer: {0}, size: {1}.", lastRemoteEndPoint, size));
+                        return;
+                    }
+
+                    payloadSizeBytes[0] = dr.ReadByte();
+                    payloadSizeBytes[1] = dr.ReadByte();
+                    payloadSize = BitConverter.ToUInt16(payloadSizeBytes, 0);
+                }
+
+                // validate payload size
+                if (payloadSize != dr.UnconsumedBufferLength)
+                {
+                    Log(LogLevel.Error, String.Format("Message dropped from peer: {0}, payload size: {1}, not as specefied: {2}", lastRemoteEndPoint, dr.UnconsumedBufferLength, payloadSize));
+                    return;
+                }
+
+                // copy the payload
+                byte[] payload = null;
+                if (payloadSize > 0)
+                {
+                    payload = new byte[payloadSize];
+                    dr.ReadBytes(payload);
+                }
 
                 RemotePeer rp;
-                if (!peersByIp.TryGetValue(fep, out rp))
+                if (!peersByIp.TryGetValue(lastRemoteEndPoint, out rp))
                 {
                     // Could be the peer has not been added yet and is requesting to be added. 
                     // Or it could be we are asking to be added and peer is accepting!
 
-                    if (sizeReceived >= Const.NORMAL_HEADER_SIZE && receiveBuffer[1] == Const.JOIN_PACKET_INFO)
+                    if (type == PacketType.AddPeer)
                     {
                         string pass = null;
-                        byte payloadSize = receiveBuffer[2];
                         if (payloadSize > 0)
-                            pass = Settings.TextEncoding.GetString(receiveBuffer, Const.NORMAL_HEADER_SIZE, payloadSize);
+                            pass = Settings.TextEncoding.GetString(payload, 0, payloadSize);
 
                         if (pass != networkPass) // TODO something else?
                         {
                             // TODO send reject and reason
-                            Log(LogLevel.Info, String.Format("Join request from: {0} dropped, bad pass.", fep));
+                            Log(LogLevel.Info, String.Format("Join request dropped from peer: {0}, bad pass.", lastRemoteEndPoint));
                         }
-                        else if (peersByIp.ContainsKey(fep))
+                        else if (peersByIp.ContainsKey(lastRemoteEndPoint))
                         {
                             // TODO send reject and reason
-                            Log(LogLevel.Warning, String.Format("Cannot add peer again: {0}, peer is already added!", fep));
+                            Log(LogLevel.Warning, String.Format("Join request dropped from peer: {0}, peer is already added!", lastRemoteEndPoint));
                         }
                         else
                         {
-                            rp = AddPeer(fep);
+                            rp = AddPeer(lastRemoteEndPoint);
                             rp.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null);
                         }
                     }
-                    else if (sizeReceived >= Const.NORMAL_HEADER_SIZE && (receiveBuffer[1] & (byte)PacketType.AcceptJoin) == (byte)PacketType.AcceptJoin)
+                    else if (type == PacketType.AcceptJoin)
                     {
                         AwaitingAcceptDetail detail;
-                        if (!TryGetAndRemoveWaitingAcceptDetail(fep, out detail))
+                        if (!TryGetAndRemoveWaitingAcceptDetail(lastRemoteEndPoint, out detail))
                         {
                             // Possible reasons we do not have detail are: 
                             //  1) Accept is too late,
                             //  2) Accept duplicated and we have already removed it, or
                             //  3) Accept was unsolicited.
 
-                            Log(LogLevel.Warning, String.Format("Dropped Accept Packet from unknown peer: {0}.", fep));
+                            Log(LogLevel.Warning, String.Format("Accept dropped from peer: {0}, join request not found.", lastRemoteEndPoint));
                         }
                         else
                         {
                             // create the new peer, add the datagram to send ACK, call the callback
-                            rp = AddPeer(fep);
-                            rp.AddReceivedDatagram(sizeReceived, receiveBuffer);
+                            rp = AddPeer(lastRemoteEndPoint);
+                            rp.AddReceivedPacket(seq, opts, type, payload);
                             TryResult tr = new TryResult(true, null, null, rp.Id);
                             detail.Callback(tr);
                         }
                     }
                     else
                     {
-                        Log(LogLevel.Warning, String.Format("Datagram dropped - unknown peer: {0}.", fep));
+                        Log(LogLevel.Warning, String.Format("Message dropped from peer: {0}, peer unknown.", lastRemoteEndPoint));
                     }
                 }
                 else
                 {
-                    rp.AddReceivedDatagram(sizeReceived, receiveBuffer);
+                    rp.AddReceivedPacket(seq, opts, type, payload);
                 }
             }
         }

@@ -29,6 +29,7 @@ namespace FalconUDP
             // Currently we only accept the real deal - raw IP address and port as numbers,
             // I'm not going to waste flipping time trying to connect to DNS and resolve the
             // IP. But when we do get around to it: http://msdn.microsoft.com/en-us/library/windows/apps/hh701245.aspx
+            // though that should be done outside this class.
 
             this.port = UInt16.Parse(port);
             this.ip = StringToIP(hostName.RawName);
