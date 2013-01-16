@@ -26,6 +26,8 @@ namespace FalconUDP
             this.hostName = new HostName(ip);
             this.portAsString = port;
 
+            // TODO fix this shit up
+
             // Currently we only accept the real deal - raw IP address and port as numbers,
             // I'm not going to waste flipping time trying to connect to DNS and resolve the
             // IP. But when we do get around to it: http://msdn.microsoft.com/en-us/library/windows/apps/hh701245.aspx
@@ -46,9 +48,9 @@ namespace FalconUDP
         {
             uint ip = 0;
             string[] octets = str.Split('.');
-            ip |= UInt32.Parse(octets[0]) << 24;
-            ip |= UInt32.Parse(octets[1]) << 16;
-            ip |= UInt32.Parse(octets[2]) << 8;
+            ip |= (UInt32.Parse(octets[0]) << 24);
+            ip |= (UInt32.Parse(octets[1]) << 16);
+            ip |= (UInt32.Parse(octets[2]) << 8);
             ip |= UInt32.Parse(octets[3]);
             return ip;
         }

@@ -82,7 +82,7 @@ namespace FalconUDP
                         else
                         {
                             // try again, re-send the packet
-                            BeginSend(pd.RawPacket);
+                            SendAsync(pd.RawPacket);
                             localPeer.Log(LogLevel.Info, String.Format("Packet to: {0} re-sent as not ACKnowledged in time.", this.EndPoint));
                         }
                     }
@@ -101,7 +101,7 @@ namespace FalconUDP
 
         internal void Ping()
         {
-            BeginSend(Const.PING_PACKET);
+            SendAsync(Const.PING_PACKET);
         }
         
         internal void BeginSend(SendOptions opts, PacketType type, byte[] payload, Action ackCallback)
@@ -186,7 +186,7 @@ namespace FalconUDP
                     Array.Copy(sendBuffer, rawPacket, sendPacketSize);
                 }
 
-                BeginSend(rawPacket);
+                SendAsync(rawPacket);
 #else
                 __BeginSend__(sendBuffer, sendPacketSize);
 #endif
@@ -195,30 +195,39 @@ namespace FalconUDP
         }
 
         // ASSUMPTION: This is not called concurrently because it is only called from 
-        //             AddReceivedPacket() calls to which are serialized.
+        //             AddReceivedPacket() calls which are serialized.
         private void BeginSendACK(byte seqAckFor)
         {
             ackBuffer[0] = seqAckFor;
-            BeginSend(ackBuffer);
+            SendAsync(ackBuffer);
         }
 
         // ASSUMPTION: This is not called concurrently because it is only called from 
-        //             AddReceivedPacket() calls to which are serialized.
+        //             AddReceivedPacket() calls which are serialized.
         private void BeginSendAntACK(byte seqAckFor)
         {
             antiAckBuffer[0] = seqAckFor;
-            BeginSend(antiAckBuffer);
+            SendAsync(antiAckBuffer);
         }
 
 #if NETFX_CORE
 
-        private void BeginSend(byte[] rawPacket)
+        private async void SendAsync(byte[] rawPacket)
         {
-            // TODO a better way than creating a DataWriter every time? http://social.msdn.microsoft.com/Forums/en-US/winappswithcsharp/thread/0d321642-13bd-40d4-b83f-963638b0d5df/#0d321642-13bd-40d4-b83f-963638b0d5df
-            using (DataWriter dw = new DataWriter(localPeer.Sock.OutputStream))
+            try
             {
-                dw.WriteBytes(rawPacket);
-                dw.StoreAsync();
+                // TODO is there a better way than creating a DataWriter every time? http://social.msdn.microsoft.com/Forums/en-US/winappswithcsharp/thread/0d321642-13bd-40d4-b83f-963638b0d5df/#0d321642-13bd-40d4-b83f-963638b0d5df
+
+                IOutputStream outStream = await localPeer.Sock.GetOutputStreamAsync(EndPoint.Address, EndPoint.Port);
+                using (DataWriter dw = new DataWriter(outStream))
+                {
+                    dw.WriteBytes(rawPacket);
+                    await dw.StoreAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                localPeer.Log(LogLevel.Error, String.Format("Exception sending to peer {0}: {1}", peerName, ex.Message));
             }
         }
 
@@ -265,7 +274,7 @@ namespace FalconUDP
                 {
                     case PacketType.Ping:
                         {
-                            BeginSend(Const.PONG_PACKET);
+                            SendAsync(Const.PONG_PACKET);
                             return;
                         }
                     case PacketType.Pong:
@@ -326,7 +335,7 @@ namespace FalconUDP
 
                                     detail.ACKTicks = 0;
                                     detail.ResentCount = 0;
-                                    BeginSend(detail.RawPacket);
+                                    SendAsync(detail.RawPacket);
                                 }
                             }
                         }
