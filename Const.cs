@@ -11,8 +11,9 @@ namespace FalconUDP
         internal const int NORMAL_HEADER_SIZE                   = 3;                                // in bytes
         internal const int LARGE_HEADER_SIZE                    = 4;                                // in bytes (used when payload size > Byte.MaxValue)
 
-        internal const int MAX_DATAGRAM_SIZE                    = 65507;                            // this is an IPv4 limit, v6 allows slightly more but we needn't
-        internal const uint UMAX_DATAGRAM_SIZE                  = 65507;                            // NETFX_CORE uses uint's
+        internal const int MAX_DATAGRAM_SIZE                    = 500;                              // try avoid fragmentation RFC 5405 3.2 http://www.rfc-editor.org/rfc/rfc5405.txt
+        internal const uint UMAX_DATAGRAM_SIZE                  = 500;                              // NETFX_CORE uses uint's
+        internal const uint MAX_PAYLOAD_SIZE                    = MAX_DATAGRAM_SIZE - LARGE_HEADER_SIZE;
 
         internal const int SIZE_OF_SEQ                          = sizeof(byte);
         internal const byte MAX_SEQ                             = Byte.MaxValue;
@@ -46,3 +47,4 @@ namespace FalconUDP
         };
     }
 }
+ 

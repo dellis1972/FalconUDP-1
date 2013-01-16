@@ -59,9 +59,9 @@ namespace FalconUDP
         internal DatagramSocket Sock;
         private Dictionary<FalconEndPoint, RemotePeer> peersByIp;     // same RemotePeers as peersById
         private ThreadPoolTimer ackCheckTimer;
-        private FalconEndPoint lastRemoteEndPoint;              // end point data last received from
         private string localPortAsString;
         private Object processingMessageLock;
+        private DataWriter dataWriter;
 #else   
         internal Socket Sock;
                                                         
@@ -116,13 +116,13 @@ namespace FalconUDP
             this.listenThread = new Thread(Listen);
             this.listenThread.Name = "Falcon ears";
             this.listenThread.IsBackground = true;
+
+            this.receiveBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
 #endif
             this.peersById = new Dictionary<int, RemotePeer>();
 
             this.RemotePeersToDrop = new List<RemotePeer>();
-
-            this.receiveBuffer = new byte[Const.MAX_DATAGRAM_SIZE];
-
+            
             this.peerIdCount = 0;
 
             this.peersLockObject = new object();
@@ -234,49 +234,46 @@ namespace FalconUDP
         {
             AwaitingAcceptDetail detail = new AwaitingAcceptDetail(endPoint, callback, pass);
             AddWaitingAcceptDetail(detail);
-            BeginJoinPeer(detail);
+            JoinPeerAsync(detail);
         }
 
         // Called directly when re-sending an AwaitingAcceptDetail already instantiated and in list
         // or via API on intial attempt after creating AwaitingAcceptDetail.
-        private void BeginJoinPeer(AwaitingAcceptDetail detail)
+        private async void JoinPeerAsync(AwaitingAcceptDetail detail)
         {
-            // This is not thread-safe - if Sock.OutputStream is used before we are finished with 
-            // it.
-
-            DataWriter dw = new DataWriter(Sock.OutputStream); 
-            dw.WriteByte(0);
-            dw.WriteByte(Const.JOIN_PACKET_INFO);
-
-            if (detail.Pass == null)
-            {
-                dw.WriteByte(0);
-            }
-            else
-            {
-                int count = Settings.TextEncoding.GetByteCount(detail.Pass);
-                if (count > Byte.MaxValue)
-                {
-                    RemoveWaitingAcceptDetail(detail);
-                    detail.Callback(new TryResult(false, "pass too long"));
-                }
-
-                dw.WriteByte((byte)count);
-                dw.WriteBytes(Settings.TextEncoding.GetBytes(detail.Pass));
-            }
-
             try
-            {
-                // We dont want to await it cause then have to make method async which is not 
-                // neccessary cause there is nothing to return, god know what happens to the 
-                // exception handler now...
+            {    
+                IOutputStream outStream = await Sock.GetOutputStreamAsync(detail.EndPoint.Address, detail.EndPoint.Port);
+                using (DataWriter dw = new DataWriter(outStream))
+                {
+                    dw.WriteByte(0);
+                    dw.WriteByte(Const.JOIN_PACKET_INFO);
 
-                dw.StoreAsync(); 
+                    if (detail.Pass == null)
+                    {
+                        dw.WriteByte(0);
+                    }
+                    else
+                    {
+                        int count = Settings.TextEncoding.GetByteCount(detail.Pass);
+                        if (count > Byte.MaxValue)
+                        {
+                            RemoveWaitingAcceptDetail(detail);
+                            detail.Callback(new TryResult(false, "pass too long"));
+                        }
+
+                        dw.WriteByte((byte)count);
+                        dw.WriteBytes(Settings.TextEncoding.GetBytes(detail.Pass));
+                    }
+
+
+                    await dw.StoreAsync();
+                }
             }
-            catch (Exception ex) // ASSUMING: StoreAsync() could throw an exception, but who knows...
+            catch (Exception ex)
             {
                 RemoveWaitingAcceptDetail(detail);
-                detail.Callback(new TryResult(ex));
+                detail.Callback(new TryResult(ex)); 
             }
         }
 #else
@@ -518,7 +515,7 @@ namespace FalconUDP
             }
             else
             {
-                rp.BeginSend(opts, PacketType.Application, data);
+                rp.BeginSend(opts, PacketType.Application, data, null);
             }
         }
 
@@ -533,7 +530,7 @@ namespace FalconUDP
             {
                 foreach (RemotePeer rp in peersByIp.Values)
                 {
-                    rp.BeginSend(opts, PacketType.Application, data);
+                    rp.BeginSend(opts, PacketType.Application, data, null);
                 }
             }
         }
@@ -550,7 +547,7 @@ namespace FalconUDP
             {
                 foreach (RemotePeer rp in peersByIp.Values)
                 {
-                    count += rp.PacketCount;
+                    count += rp.UnreadPacketCount;
                 }
                 
                 if (count == 0)
@@ -607,7 +604,7 @@ namespace FalconUDP
             }
             else
             {
-                rp.BeginSend(opts, type, payload);
+                rp.BeginSend(opts, type, payload, null);
             }
         }
         
@@ -652,7 +649,7 @@ namespace FalconUDP
                             else
                             {
                                 // try again
-                                BeginJoinPeer(aad);
+                                JoinPeerAsync(aad);
                             }
                         }
                     }

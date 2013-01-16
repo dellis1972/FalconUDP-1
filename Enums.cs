@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 namespace FalconUDP
 {
     /// <summary>
-    /// 
+    /// TODO
     /// </summary>
     public enum LogLevel : byte
     {
@@ -51,7 +51,6 @@ namespace FalconUDP
         DropPeer,
         AcceptJoin,
         RejectJoin,
-        Resynch,
         Ping,
         Pong,
         Application,

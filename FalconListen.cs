@@ -24,36 +24,26 @@ namespace FalconUDP
 
         private void MessageReceived(DatagramSocket sender, DatagramSocketMessageReceivedEventArgs args)
         {
-            if(args.RemoteAddress.Type != HostNameType.Ipv4)
+            try
             {
-                // TODO support other types once the rest of Falcon does
-                Log(LogLevel.Warning, String.Format("Dropped Message - Remote peer: {0} unsupported type: {1}.", args.RemoteAddress.RawName, args.RemoteAddress.Type));
-                return;
-            }
-            
-            if(args.RemoteAddress.RawName.StartsWith("127.") && args.RemotePort == localPortAsString)
-            {
-                Log(LogLevel.Warning, "Dropped Message received from self.");
-                return;
-            }
-            
-            // NETFX_CORE insists messages are received asynchoronously so we are going to 
-            // have to lock the receiveBuffer while the message is being added - we can't have 
-            // more than one message being added when another message arrives and overwrites 
-            // the buffer, even then, if it were for the same peer - threads will contend for all 
-            // the class level sequence counters &c. being used!
+                // accessing the properties of args seems to throw exceptions
 
-            // THOUGHTS: Perhaps MessageReceived is not raised concurrently with another invocation
-            //           - otherwise how does DatagramSocket not overwrite its internal buffer? It 
-            //           could have multiple buffers so we have to presume it could be raised 
-            //           concurrently... 
-            // http://social.msdn.microsoft.com/Forums/en-US/winappswithcsharp/thread/e3701b43-2f09-4059-9b82-d7405a0ffdc8
+                if (args.RemoteAddress.Type != HostNameType.Ipv4)
+                {
+                    // TODO support other types once the rest of Falcon does
+                    Log(LogLevel.Warning, String.Format("Dropped Message - Remote peer: {0} unsupported type: {1}.", args.RemoteAddress.RawName, args.RemoteAddress.Type));
+                    return;
+                }
 
-            lock (processingMessageLock)
-            {
-                lastRemoteEndPoint = new FalconEndPoint(args.RemoteAddress.RawName, args.RemotePort); // careful todo this within the lock so doesn't get re-assigned while we are using it
-                
-                DataReader dr = args.GetDataReader();  
+                if (args.RemoteAddress.RawName.StartsWith("127.") && args.RemotePort == localPortAsString)
+                {
+                    Log(LogLevel.Warning, "Dropped Message received from self.");
+                    return;
+                }
+
+                FalconEndPoint lastRemoteEndPoint = new FalconEndPoint(args.RemoteAddress.RawName, args.RemotePort); // careful todo this within the lock so doesn't get re-assigned while we are using it
+
+                DataReader dr = args.GetDataReader();
                 int size = (int)dr.UnconsumedBufferLength;
 
                 if (size == 0)
@@ -72,9 +62,9 @@ namespace FalconUDP
                 byte packetInfo = dr.ReadByte();
 
                 // parse packet info byte
-                HeaderPayloadSizeType hpst  = (HeaderPayloadSizeType)(packetInfo & Const.PAYLOAD_SIZE_TYPE_MASK);
-                SendOptions opts            = (SendOptions)(packetInfo & Const.SEND_OPTS_MASK);
-                PacketType type             = (PacketType)(packetInfo & Const.PACKET_TYPE_MASK);
+                HeaderPayloadSizeType hpst = (HeaderPayloadSizeType)(packetInfo & Const.PAYLOAD_SIZE_TYPE_MASK);
+                SendOptions opts = (SendOptions)(packetInfo & Const.SEND_OPTS_MASK);
+                PacketType type = (PacketType)(packetInfo & Const.PACKET_TYPE_MASK);
 
                 // check the header makes sense
                 if (!Enum.IsDefined(Const.HEADER_PAYLOAD_SIZE_TYPE_TYPE, hpst)
@@ -144,7 +134,7 @@ namespace FalconUDP
                         else
                         {
                             rp = AddPeer(lastRemoteEndPoint);
-                            rp.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null);
+                            rp.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null, null);
                         }
                     }
                     else if (type == PacketType.AcceptJoin)
@@ -177,6 +167,10 @@ namespace FalconUDP
                 {
                     rp.AddReceivedPacket(seq, opts, type, payload);
                 }
+            }
+            catch (Exception ex)
+            {
+ 
             }
         }
 
