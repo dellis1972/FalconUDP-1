@@ -22,7 +22,7 @@ namespace FalconUDP
 
 #if NETFX_CORE
 
-        private void MessageReceived(DatagramSocket sender, DatagramSocketMessageReceivedEventArgs args)
+        private async void MessageReceived(DatagramSocket sender, DatagramSocketMessageReceivedEventArgs args)
         {
             try
             {
@@ -133,8 +133,9 @@ namespace FalconUDP
                         }
                         else
                         {
-                            rp = AddPeer(lastRemoteEndPoint);
-                            rp.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null, null);
+                            rp = await TryAddPeerAsync(lastRemoteEndPoint);
+                            if(rp != null)
+                                rp.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null, null);
                         }
                     }
                     else if (type == PacketType.AcceptJoin)
@@ -152,10 +153,13 @@ namespace FalconUDP
                         else
                         {
                             // create the new peer, add the datagram to send ACK, call the callback
-                            rp = AddPeer(lastRemoteEndPoint);
-                            rp.AddReceivedPacket(seq, opts, type, payload);
-                            TryResult tr = new TryResult(true, null, null, rp.Id);
-                            detail.Callback(tr);
+                            rp = await TryAddPeerAsync(lastRemoteEndPoint);
+                            if (rp != null)
+                            {
+                                rp.AddReceivedPacket(seq, opts, type, payload);
+                                TryResult tr = new TryResult(true, null, null, rp.Id);
+                                detail.Callback(tr);
+                            }
                         }
                     }
                     else
@@ -170,7 +174,7 @@ namespace FalconUDP
             }
             catch (Exception ex)
             {
- 
+                Log(LogLevel.Error, String.Format("Exception in MessageReceived handler: {0}.", ex.Message));
             }
         }
 

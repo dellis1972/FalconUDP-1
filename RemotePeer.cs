@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Net;
 #if NETFX_CORE
 using Windows.Storage.Streams;
+using System.Threading.Tasks;
 #else
 using System.Net.Sockets;
 #endif
@@ -13,6 +14,7 @@ namespace FalconUDP
     {
 #if NETFX_CORE
         internal FalconEndPoint EndPoint;
+        private IOutputStream outStream;
 #else
         internal IPEndPoint EndPoint;
 #endif
@@ -35,12 +37,11 @@ namespace FalconUDP
         private object receivingPacketLock;
 
 #if NETFX_CORE
-        internal RemotePeer(FalconPeer localPeer, int id, FalconEndPoint endPoint)
+        internal RemotePeer(FalconPeer localPeer, FalconEndPoint endPoint)
 #else
-        internal RemotePeer(FalconPeer localPeer, int id, IPEndPoint endPoint)
+        internal RemotePeer(FalconPeer localPeer, IPEndPoint endPoint)
 #endif
         {
-            this.Id                     = id;
             this.localPeer              = localPeer;
             this.sendSeqCount           = 0;
             this.EndPoint               = endPoint;
@@ -52,8 +53,8 @@ namespace FalconUDP
             this.peerName               = endPoint.ToString();
             this.sendSeqCount           = 0;
             this.lastReceivedSeq        = 0;
-            this.ackBuffer              = new byte[] { 0, (byte)PacketType.ACK, 0 };
-            this.antiAckBuffer          = new byte[] { 0, (byte)PacketType.AntiACK, 0 };
+            this.ackBuffer              = new byte[] { 0, Const.ACK_PACKET_INFO, 0 };
+            this.antiAckBuffer          = new byte[] { 0, Const.ANTI_ACK_PACKET_INFO, 0 };
             this.sendBuffer             = new byte[Const.MAX_DATAGRAM_SIZE];
             this.receivingPacketLock    = new object();
         }
@@ -74,7 +75,7 @@ namespace FalconUDP
                         pd.ResentCount++;
                         if (pd.ResentCount > Settings.ACKRetryAttempts)
                         {
-                            // give-up, assume the peer has disconnected and drop it
+                            // give-up, assume the peer has disconnected and drop it TODO BYE
                             sentPacketsAwaitingACKToRemove.Add(pd);
                             localPeer.RemotePeersToDrop.Add(this);
                             localPeer.Log(LogLevel.Warning, String.Format("Peer dropped - failed to ACK {0} re-sends of Reliable packet in time.", Settings.ACKRetryAttempts));
@@ -193,24 +194,21 @@ namespace FalconUDP
 
             }
         }
-
-        // ASSUMPTION: This is not called concurrently because it is only called from 
-        //             AddReceivedPacket() calls which are serialized.
-        private void BeginSendACK(byte seqAckFor)
-        {
-            ackBuffer[0] = seqAckFor;
-            SendAsync(ackBuffer);
-        }
-
-        // ASSUMPTION: This is not called concurrently because it is only called from 
-        //             AddReceivedPacket() calls which are serialized.
-        private void BeginSendAntACK(byte seqAckFor)
-        {
-            antiAckBuffer[0] = seqAckFor;
-            SendAsync(antiAckBuffer);
-        }
-
+        
 #if NETFX_CORE
+
+        internal async Task<TryResult> InitAsync()
+        {
+            try
+            {
+                this.outStream = await localPeer.Sock.GetOutputStreamAsync(EndPoint.Address, EndPoint.Port);
+                return TryResult.SuccessResult;
+            }
+            catch (Exception ex)
+            {
+                return new TryResult(ex);
+            }
+        }
 
         private async void SendAsync(byte[] rawPacket)
         {
@@ -218,11 +216,11 @@ namespace FalconUDP
             {
                 // TODO is there a better way than creating a DataWriter every time? http://social.msdn.microsoft.com/Forums/en-US/winappswithcsharp/thread/0d321642-13bd-40d4-b83f-963638b0d5df/#0d321642-13bd-40d4-b83f-963638b0d5df
 
-                IOutputStream outStream = await localPeer.Sock.GetOutputStreamAsync(EndPoint.Address, EndPoint.Port);
                 using (DataWriter dw = new DataWriter(outStream))
                 {
                     dw.WriteBytes(rawPacket);
                     await dw.StoreAsync();
+                    dw.DetachStream(); // so socket can be used with another DataWriter
                 }
             }
             catch (Exception ex)
@@ -284,22 +282,15 @@ namespace FalconUDP
                         break;
                     case PacketType.AddPeer:
                         {
-                            // Must be hasn't received Accept yet (otherwise AddPeer wouldn't have go 
-                            // this far - as this RemotePeer wouldn't be created yet).
+                            // Must be hasn't received Accept yet and is resending (otherwise 
+                            // AddPeer wouldn't have go this far - as this RemotePeer wouldn't be 
+                            // created yet).
 
                             return;
                         }
                     case PacketType.ACK:
                     case PacketType.AntiACK:
                         {
-                            if (payload.Length != Const.SIZE_OF_SEQ)
-                            {
-                                localPeer.Log(LogLevel.Error, String.Format("ACK or AntiACK packet dropped from peer: {0}, bad payload size: {1}, expected: {2}.", peerName, payload.Length, Const.SIZE_OF_SEQ));
-                                return;
-                            }
-
-                            byte seqACKFor = payload[0];
-
                             lock (sentPacketsAwaitingACK)   // ACK Tick also uses this collection
                             {
                                 // Look for the oldest PacketDetail with the same seq which we ASSUME 
@@ -363,7 +354,8 @@ namespace FalconUDP
                             // If packet requries ACK - send it!
                             if (reqReliable)
                             {
-                                BeginSendACK(seq);
+                                ackBuffer[0] = seq;
+                                SendAsync(ackBuffer);
                             }
 
                             // If packet required to be in order check it is after the max seq already 
@@ -380,7 +372,8 @@ namespace FalconUDP
                                 //    // This is expected now and then, no need to log.
 
                                 //    if (reqReliable)
-                                //        BeginSendAntACK(seq);
+                                //        antiAckBuffer[0] = seqAckFor;
+                                //        SendAsync(antiAckBuffer);
 
                                 //    return;
                                 //}

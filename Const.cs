@@ -31,6 +31,8 @@ namespace FalconUDP
         internal const byte PACKET_TYPE_MASK                    = 15;                               // 0000 1111 AND'd with packet info byte returns PacketType
 
         internal const byte JOIN_PACKET_INFO                    = (byte)((byte)PacketType.AddPeer | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
+        internal const byte ACK_PACKET_INFO                     = (byte)((byte)PacketType.ACK | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
+        internal const byte ANTI_ACK_PACKET_INFO                = (byte)((byte)PacketType.AntiACK | (byte)SendOptions.None | (byte)HeaderPayloadSizeType.Byte);
 
         internal static byte[] PING_PACKET = new byte[] 
         {

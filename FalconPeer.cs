@@ -165,8 +165,8 @@ namespace FalconUDP
             }
             catch (Exception ex)
             {
-                // This feels like a pretty sloppy way of doing things, we arn't even told
-                // what exceptions could be thrown! (We know at least the address could be in use)
+                // This feels like a pretty sloppy way of doing things, we arn't even told what 
+                // exceptions could be thrown! (We know at least the address could be in use).
                 // This is what the offical sample does: 
                 // http://code.msdn.microsoft.com/windowsapps/DatagramSocket-sample-76a7d82b/sourcecode?fileId=57971&pathId=589460989
 
@@ -666,25 +666,33 @@ namespace FalconUDP
             }
         }
 #if NETFX_CORE
-        internal RemotePeer AddPeer(FalconEndPoint ep)
+        internal async Task<RemotePeer> TryAddPeerAsync(FalconEndPoint ep)
 #else
         internal RemotePeer AddPeer(IPEndPoint ep)
 #endif
         {
-            lock (peersLockObject) // application can use the peer collections e.g. SendToAll()
-            {
-                peerIdCount++;
+                RemotePeer rp = new RemotePeer(this, ep);
+#if NETFX_CORE
+                TryResult tr = await rp.InitAsync();
+                if (!tr.Success)
+                {
+                    Log(LogLevel.Error, "Failed to add remote peer: " + tr.NonSuccessMessage);
+                    return null;
+                }
+#endif
+                lock (peersLockObject) // application can use the peer collections e.g. SendToAll()
+                {
+                    peerIdCount++;
+                    rp.Id = peerIdCount;
+                    peersById.Add(peerIdCount, rp);
+                    peersByIp.Add(ep, rp);
 
-                RemotePeer rp = new RemotePeer(this, peerIdCount, ep);
-                peersById.Add(peerIdCount, rp);
-                peersByIp.Add(ep, rp);
+                    // raise peer added event 
+                    if (PeerAdded != null)
+                        PeerAdded(rp.Id); // TODO should begin invoke? dont want to hold up
 
-                // raise peer added event 
-                if (PeerAdded != null)
-                    PeerAdded(rp.Id); // TODO should begin invoke? dont want to hold up
-
-                return rp;
-            }
+                    return rp;
+                }
         }
 
 #if NETFX_CORE
@@ -752,7 +760,11 @@ namespace FalconUDP
             bool found = false;
             lock (awaitingAcceptDetails)
             {
+#if NETFX_CORE
+                detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.Equals(ep));
+#else
                 detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.Address.Equals(ep.Address) && aad.EndPoint.Port == ep.Port);
+#endif
                 if (detail != null)
                 {
                     found = true;
@@ -787,3 +799,4 @@ namespace FalconUDP
         }
     }
 }
+
