@@ -13,7 +13,7 @@ namespace FalconUDP
     class RemotePeer
     {
 #if NETFX_CORE
-        internal FalconEndPoint EndPoint;
+        internal IPv4EndPoint EndPoint;
         private IOutputStream outStream;
 #else
         internal IPEndPoint EndPoint;
@@ -37,7 +37,7 @@ namespace FalconUDP
         private object receivingPacketLock;
 
 #if NETFX_CORE
-        internal RemotePeer(FalconPeer localPeer, FalconEndPoint endPoint)
+        internal RemotePeer(FalconPeer localPeer, IPv4EndPoint endPoint)
 #else
         internal RemotePeer(FalconPeer localPeer, IPEndPoint endPoint)
 #endif

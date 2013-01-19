@@ -41,7 +41,7 @@ namespace FalconUDP
                     return;
                 }
 
-                FalconEndPoint lastRemoteEndPoint = new FalconEndPoint(args.RemoteAddress.RawName, args.RemotePort); // careful todo this within the lock so doesn't get re-assigned while we are using it
+                IPv4EndPoint lastRemoteEndPoint = new IPv4EndPoint(args.RemoteAddress.RawName, args.RemotePort); // careful todo this within the lock so doesn't get re-assigned while we are using it
 
                 DataReader dr = args.GetDataReader();
                 int size = (int)dr.UnconsumedBufferLength;

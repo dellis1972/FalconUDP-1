@@ -57,7 +57,7 @@ namespace FalconUDP
 
 #if NETFX_CORE
         internal DatagramSocket Sock;
-        private Dictionary<FalconEndPoint, RemotePeer> peersByIp;     // same RemotePeers as peersById
+        private Dictionary<IPv4EndPoint, RemotePeer> peersByIp;     // same RemotePeers as peersById
         private ThreadPoolTimer ackCheckTimer;
         private string localPortAsString;
         private Object processingMessageLock;
@@ -104,7 +104,7 @@ namespace FalconUDP
 
 #if NETFX_CORE
             this.localPortAsString = this.localPort.ToString();
-            this.peersByIp = new Dictionary<FalconEndPoint, RemotePeer>();
+            this.peersByIp = new Dictionary<IPv4EndPoint, RemotePeer>();
             this.processingMessageLock = new Object();
 #else
             this.peersByIp = new Dictionary<IPEndPoint, RemotePeer>();
@@ -225,12 +225,12 @@ namespace FalconUDP
             if (stop)
                 callback(new TryResult(false, "Falcon is not started!"));
 
-            FalconEndPoint fep = new FalconEndPoint(addr, port.ToString());
+            IPv4EndPoint fep = new IPv4EndPoint(addr, port.ToString());
             BeginJoinPeer(fep, callback, pass);
         }
 
         // called on first attempt
-        private void BeginJoinPeer(FalconEndPoint endPoint, TryCallback callback, string pass)
+        private void BeginJoinPeer(IPv4EndPoint endPoint, TryCallback callback, string pass)
         {
             AwaitingAcceptDetail detail = new AwaitingAcceptDetail(endPoint, callback, pass);
             AddWaitingAcceptDetail(detail);
@@ -590,7 +590,7 @@ namespace FalconUDP
         }
 
 #if NETFX_CORE
-        private void BeginSendTo(FalconEndPoint endPoint, SendOptions opts, PacketType type, byte[] payload)
+        private void BeginSendTo(IPv4EndPoint endPoint, SendOptions opts, PacketType type, byte[] payload)
 #else
         private void BeginSendTo(IPEndPoint endPoint, SendOptions opts, PacketType type, byte[] payload)
 #endif
@@ -666,7 +666,7 @@ namespace FalconUDP
             }
         }
 #if NETFX_CORE
-        internal async Task<RemotePeer> TryAddPeerAsync(FalconEndPoint ep)
+        internal async Task<RemotePeer> TryAddPeerAsync(IPv4EndPoint ep)
 #else
         internal RemotePeer AddPeer(IPEndPoint ep)
 #endif
@@ -696,7 +696,7 @@ namespace FalconUDP
         }
 
 #if NETFX_CORE
-        private void TryRemovePeer(FalconEndPoint ep)
+        private void TryRemovePeer(IPv4EndPoint ep)
 #else
         private void TryRemovePeer(IPEndPoint ip)
 #endif
@@ -752,7 +752,7 @@ namespace FalconUDP
         }
 
 #if NETFX_CORE
-        private bool TryGetAndRemoveWaitingAcceptDetail(FalconEndPoint ep, out AwaitingAcceptDetail detail)
+        private bool TryGetAndRemoveWaitingAcceptDetail(IPv4EndPoint ep, out AwaitingAcceptDetail detail)
 #else
         private bool TryGetAndRemoveWaitingAcceptDetail(IPEndPoint ep, out AwaitingAcceptDetail detail)
 #endif
@@ -761,7 +761,7 @@ namespace FalconUDP
             lock (awaitingAcceptDetails)
             {
 #if NETFX_CORE
-                detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.Equals(ep));
+                detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.IsEqual(ep));
 #else
                 detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.Address.Equals(ep.Address) && aad.EndPoint.Port == ep.Port);
 #endif

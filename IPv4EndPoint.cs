@@ -1,0 +1,94 @@
+﻿#if NETFX_CORE
+using System;
+using System.Text;
+using Windows.Networking;
+using Windows.Networking.Connectivity;
+using Windows.Networking.Sockets;
+
+namespace FalconUDP
+{
+    /// <summary>
+    /// Replacement for IPEndPoint which is lacking in NETFX_CORE.
+    /// </summary>
+    class IPv4EndPoint : IEquatable<IPv4EndPoint>
+    {
+        private HostName hostName;
+        private string portAsString;
+        private uint ip;
+        private ushort port;
+        private int hash;
+        private string asString;
+
+        public HostName Address { get { return hostName; } }    //} dumbass NETFX_CORE expects these types
+        public string Port { get { return portAsString; } }     //} (why the frig is port a string?!)
+
+        internal IPv4EndPoint(string addr, string port)
+        {
+            // Currently we only accept the real deal - raw IPv4 address and port as numbers,
+            // I'm not going to waste flipping time trying to connect to DNS and resolve the
+            // IP. But when we do get around to it: http://msdn.microsoft.com/en-us/library/windows/apps/hh701245.aspx
+            // though that should be done outside this class.
+
+            if (!UInt16.TryParse(port, out this.port))
+            {
+                throw new ArgumentException("Port must be a number between 0 - 65535");
+            }
+
+            if (!TryParseIPv4Address(hostName.RawName, out this.ip))
+            {
+                throw new ArgumentException("Invalid IPv4 adrress: " + addr);
+            }
+
+            this.hostName = new HostName(addr);
+            this.portAsString = port;
+
+            // Since address and port cannot be modefied, i.e. FalconEndPoint is immutable, calc 
+            // the hash and string now and always return those when asked for.
+
+            this.hash = unchecked((int)this.ip) ^ this.port;
+            this.asString = String.Format("{0}:{1}", hostName.CanonicalName, port);
+        }
+
+        internal static bool TryParseIPv4Address(string addr, out uint ip)
+        {
+            ip = 0;
+
+            if (String.IsNullOrWhiteSpace(addr))
+                return false;
+
+            string[] octets = addr.Split('.');
+
+            if (octets.Length != 4)
+                return false;
+
+            byte octet;
+            for (int i = 0; i < 4; i++)
+            {
+                if (!Byte.TryParse(octets[i], out octet))
+                    return false;
+
+                ip |= (uint)(octet << (8*(3-i)));
+            }
+
+            return true;
+        }
+
+        public override int GetHashCode()
+        {
+            return hash;
+        }
+
+        public override string ToString()
+        {
+            return asString;
+        }
+
+        internal bool Equal(IPv4EndPoint other)
+        {
+            return this.ip == other.ip && this.port == other.port;
+        }
+
+        // NOTE: We have not overriden Object.Equals(object), so reference equality is still used.
+    }
+}
+#endif

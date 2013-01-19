@@ -10,7 +10,7 @@ namespace FalconUDP
     class AwaitingAcceptDetail
     {
 #if NETFX_CORE
-        internal FalconEndPoint EndPoint;
+        internal IPv4EndPoint EndPoint;
 #else
         internal IPEndPoint EndPoint;
 #endif
@@ -21,7 +21,7 @@ namespace FalconUDP
         internal int RetryCount;
 
 #if NETFX_CORE
-        internal AwaitingAcceptDetail(FalconEndPoint ip, TryCallback callback, string pass)
+        internal AwaitingAcceptDetail(IPv4EndPoint ip, TryCallback callback, string pass)
 #else
         internal AwaitingAcceptDetail(IPEndPoint ip, TryCallback callback, string pass)
 #endif
