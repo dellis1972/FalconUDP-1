@@ -1,3 +1,4 @@
+- Allow user application to set settings
 - BYE PacketType (inc. reason in payload)
 - Tuncated bit and automatically fragment packets > MAX_DATAGRAM_SIZE? (only for reliable)
 - InOrder, ReliableInOrder
