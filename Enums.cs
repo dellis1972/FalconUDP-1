@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 namespace FalconUDP
 {
     /// <summary>
-    /// TODO
+    /// LogLevel
     /// </summary>
     public enum LogLevel : byte
     {
@@ -20,8 +20,12 @@ namespace FalconUDP
     }
 
     /// <summary>
-    /// TODO
+    /// Options how to send a packet.
     /// </summary>
+    /// <remarks>
+    /// Reliable packets are re-sent until ACKnowledged
+    /// InOrder specfies packets not in order when reading packets packets received will be dropped.
+    /// </remarks>
     [Flags]
     public enum SendOptions : byte
     {
@@ -31,18 +35,14 @@ namespace FalconUDP
         ReliableInOrder = 48    // 0011 0000
     }
 
-    //
     // bits 1 and 2 of packet info byte in header
-    //
     enum HeaderPayloadSizeType : byte
     {
         Byte    = 64,   // 0100 0000
         UInt16  = 128,  // 1000 0000
     }
 
-    //
     // packet type (last 4 bits of packet info byte in header)
-    //
     enum PacketType : byte
     {
         ACK,

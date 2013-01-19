@@ -57,11 +57,10 @@ namespace FalconUDP
 
 #if NETFX_CORE
         internal DatagramSocket Sock;
-        private Dictionary<IPv4EndPoint, RemotePeer> peersByIp;     // same RemotePeers as peersById
+        private Dictionary<IPv4EndPoint, RemotePeer> peersByIp; // same RemotePeers as peersById
         private ThreadPoolTimer ackCheckTimer;
         private string localPortAsString;
         private Object processingMessageLock;
-        private DataWriter dataWriter;
 #else   
         internal Socket Sock;
                                                         
@@ -241,32 +240,37 @@ namespace FalconUDP
         // or via API on intial attempt after creating AwaitingAcceptDetail.
         private async void JoinPeerAsync(AwaitingAcceptDetail detail)
         {
+            if (detail.JoinPacket == null)
+            {
+                if (detail.Pass == null)
+                {
+                    detail.JoinPacket = new byte[Const.NORMAL_HEADER_SIZE];
+                    detail.JoinPacket[2] = 0;
+                }
+                else
+                {
+                    int count = Settings.TextEncoding.GetByteCount(detail.Pass);
+                    if (count > Byte.MaxValue)
+                    {
+                        RemoveWaitingAcceptDetail(detail);
+                        detail.Callback(new TryResult(false, "pass too long"));
+                        return;
+                    }
+
+                    detail.JoinPacket = new byte[count + Const.NORMAL_HEADER_SIZE];
+                    detail.JoinPacket[2] = (byte)count;
+                    System.Buffer.BlockCopy(Settings.TextEncoding.GetBytes(detail.Pass), 0, detail.JoinPacket, Const.NORMAL_HEADER_SIZE, count);
+                }
+                detail.JoinPacket[1] = Const.JOIN_PACKET_INFO;
+            }
+
             try
             {    
+                // TODO use same output stream?
                 IOutputStream outStream = await Sock.GetOutputStreamAsync(detail.EndPoint.Address, detail.EndPoint.Port);
                 using (DataWriter dw = new DataWriter(outStream))
                 {
-                    dw.WriteByte(0);
-                    dw.WriteByte(Const.JOIN_PACKET_INFO);
-
-                    if (detail.Pass == null)
-                    {
-                        dw.WriteByte(0);
-                    }
-                    else
-                    {
-                        int count = Settings.TextEncoding.GetByteCount(detail.Pass);
-                        if (count > Byte.MaxValue)
-                        {
-                            RemoveWaitingAcceptDetail(detail);
-                            detail.Callback(new TryResult(false, "pass too long"));
-                        }
-
-                        dw.WriteByte((byte)count);
-                        dw.WriteBytes(Settings.TextEncoding.GetBytes(detail.Pass));
-                    }
-
-
+                    dw.WriteBytes(detail.JoinPacket);
                     await dw.StoreAsync();
                 }
             }
@@ -439,18 +443,14 @@ namespace FalconUDP
 
         // Called directly when re-sending an AwaitingAcceptDetail already instantiated and in list
         // or via API on intial attempt after creating AwaitingAcceptDetail.
-        private void BeginTryJoinPeer(AwaitingAcceptDetail detail)        
+        private void BeginTryJoinPeer(AwaitingAcceptDetail detail)
         {
-            lock (sendBuffer) // we could be being called from Timer or application
+            if (detail.JoinPacket == null)
             {
-                Buffer.SetByte(sendBuffer, 0, 0);
-                Buffer.SetByte(sendBuffer, 1, Const.JOIN_PACKET_INFO);
-
-                int size = 0;
                 if (detail.Pass == null)
                 {
-                    Buffer.SetByte(sendBuffer, 2, 0);
-                    size = Const.NORMAL_HEADER_SIZE;
+                    detail.JoinPacket = new byte[Const.NORMAL_HEADER_SIZE];
+                    detail.JoinPacket[2] = 0;
                 }
                 else
                 {
@@ -462,39 +462,40 @@ namespace FalconUDP
                         return;
                     }
 
-                    Buffer.SetByte(sendBuffer, 2, (byte)count);
-                    Buffer.BlockCopy(Settings.TextEncoding.GetBytes(detail.Pass), 0, sendBuffer, Const.NORMAL_HEADER_SIZE, count);
-                    size = Const.NORMAL_HEADER_SIZE + count;
+                    detail.JoinPacket = new byte[count + Const.NORMAL_HEADER_SIZE];
+                    detail.JoinPacket[2] = (byte)count;
+                    System.Buffer.BlockCopy(Settings.TextEncoding.GetBytes(detail.Pass), 0, detail.JoinPacket, Const.NORMAL_HEADER_SIZE, count);
                 }
+                detail.JoinPacket[1] = Const.JOIN_PACKET_INFO;
+            }
 
-                try
-                {
-                    Sock.BeginSendTo(sendBuffer, 0, size, SocketFlags.None, detail.EndPoint, new AsyncCallback(delegate(IAsyncResult result)
+            try
+            {
+                Sock.BeginSendTo(detail.JoinPacket, 0, detail.JoinPacket.Length, SocketFlags.None, detail.EndPoint, new AsyncCallback(delegate(IAsyncResult result)
+                    {
+                        // NOTE: lock on sendBuffer is lost if completed asynchoronously
+
+                        try
                         {
-                            // NOTE: lock on sendBuffer is lost if completed asynchoronously
+                            Sock.EndSendTo(result);
+                        }
+                        catch (SocketException se)
+                        {
+                            // We, quite likely, are on a different thread to the caller of 
+                            // BeginTryJoin() call in this anonymous method, and the caller, 
+                            // quite likely, has locked awaitingAcceptDetails e.g. in 
+                            // ACKCheckTick() when re-sending, so don't try re-acquire lock 
+                            // here - that would be a dead lock!
 
-                            try
-                            {
-                                Sock.EndSendTo(result);
-                            }
-                            catch (SocketException se)
-                            {
-                                // We, quite likely, are on a different thread to the caller of 
-                                // BeginTryJoin() call in this anonymous method, and the caller, 
-                                // quite likely, has locked awaitingAcceptDetails e.g. in 
-                                // ACKCheckTick() when re-sending, so don't try re-acquire lock 
-                                // here - that would be a dead lock!
-
-                                awaitingAcceptDetailsToRemove.Add(detail); 
-                                detail.Callback(new TryResult(se));
-                            }
-                        }), null);
-                }
-                catch (SocketException se)
-                {
-                    RemoveWaitingAcceptDetail(detail);
-                    detail.Callback(new TryResult(se));
-                }
+                            awaitingAcceptDetailsToRemove.Add(detail);
+                            detail.Callback(new TryResult(se));
+                        }
+                    }), null);
+            }
+            catch (SocketException se)
+            {
+                RemoveWaitingAcceptDetail(detail);
+                detail.Callback(new TryResult(se));
             }
         }
 #endif
@@ -649,7 +650,11 @@ namespace FalconUDP
                             else
                             {
                                 // try again
+#if NETFX_CORE
                                 JoinPeerAsync(aad);
+#else
+                                BeginTryJoinPeer(aad);
+#endif
                             }
                         }
                     }
@@ -698,7 +703,7 @@ namespace FalconUDP
 #if NETFX_CORE
         private void TryRemovePeer(IPv4EndPoint ep)
 #else
-        private void TryRemovePeer(IPEndPoint ip)
+        private void TryRemovePeer(IPEndPoint ep)
 #endif
         {
             RemotePeer rp;
@@ -761,7 +766,7 @@ namespace FalconUDP
             lock (awaitingAcceptDetails)
             {
 #if NETFX_CORE
-                detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.IsEqual(ep));
+                detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.Equals(ep));
 #else
                 detail = awaitingAcceptDetails.Find(aad => aad.EndPoint.Address.Equals(ep.Address) && aad.EndPoint.Port == ep.Port);
 #endif

@@ -177,9 +177,7 @@ namespace FalconUDP
                 Log(LogLevel.Error, String.Format("Exception in MessageReceived handler: {0}.", ex.Message));
             }
         }
-
 #else
-
         private void Listen()
         {
             while (true)
@@ -214,6 +212,71 @@ namespace FalconUDP
                         TryRemovePeer(ip);
                         continue;
                     }
+                    else if (sizeReceived < Const.NORMAL_HEADER_SIZE || sizeReceived > Const.MAX_DATAGRAM_SIZE)
+                    {
+                        Log(LogLevel.Error, String.Format("Datagram dropped from peer: {0}, bad size: {0}", lastRemoteEndPoint, sizeReceived));
+                        return;
+                    }
+
+                    byte seq        = receiveBuffer[0];
+                    byte packetInfo = receiveBuffer[1];
+
+                    // parse packet info byte
+                    HeaderPayloadSizeType hpst = (HeaderPayloadSizeType)(packetInfo & Const.PAYLOAD_SIZE_TYPE_MASK);
+                    SendOptions opts = (SendOptions)(packetInfo & Const.SEND_OPTS_MASK);
+                    PacketType type = (PacketType)(packetInfo & Const.PACKET_TYPE_MASK);
+
+                    // check the header makes sense
+                    if (!Enum.IsDefined(Const.HEADER_PAYLOAD_SIZE_TYPE_TYPE, hpst)
+                        || !Enum.IsDefined(Const.SEND_OPTIONS_TYPE, opts)
+                        || !Enum.IsDefined(Const.PACKET_TYPE_TYPE, type))
+                    {
+                        Log(LogLevel.Warning, String.Format("Datagram dropped from peer: {0}, bad header.", lastRemoteEndPoint));
+                        return;
+                    }
+
+                    // read payload
+                    int payloadSize;
+                    byte[] payload = null;
+                    if (hpst == HeaderPayloadSizeType.Byte)
+                    {
+                        payloadSize = receiveBuffer[2];
+
+                        // validate payload size
+                        if (payloadSize != (sizeReceived - Const.NORMAL_HEADER_SIZE))
+                        {
+                            Log(LogLevel.Error, String.Format("Datagram dropped from peer: {0}, payload size: {1}, not as specefied: {2}", lastRemoteEndPoint, (sizeReceived - Const.NORMAL_HEADER_SIZE), payloadSize));
+                            return;
+                        }
+
+                        if (payloadSize > 0)
+                        {
+                            payload = new byte[payloadSize];
+                            System.Buffer.BlockCopy(receiveBuffer, Const.NORMAL_HEADER_SIZE, payload, 0, payloadSize);
+                        }
+                    }
+                    else
+                    {
+                        if (sizeReceived < Const.LARGE_HEADER_SIZE)
+                        {
+                            Log(LogLevel.Error, String.Format("Datagram with large header dropped from peer: {0}, size: {1}.", lastRemoteEndPoint, sizeReceived));
+                            return;
+                        }
+
+                        payloadSizeBytes[0] = receiveBuffer[2];
+                        payloadSizeBytes[1] = receiveBuffer[3];
+                        payloadSize = BitConverter.ToUInt16(payloadSizeBytes, 0);
+
+                        // validate payload size
+                        if (payloadSize != (sizeReceived - Const.LARGE_HEADER_SIZE))
+                        {
+                            Log(LogLevel.Error, String.Format("Datagram dropped from peer: {0}, payload size: {1}, not as specefied: {2}", lastRemoteEndPoint, (sizeReceived - Const.LARGE_HEADER_SIZE), payloadSize));
+                            return;
+                        }
+
+                        payload = new byte[payloadSize];
+                        System.Buffer.BlockCopy(receiveBuffer, Const.NORMAL_HEADER_SIZE, payload, 0, payloadSize);
+                    }
 
                     RemotePeer rp;
                     if (!peersByIp.TryGetValue(ip, out rp))
@@ -221,10 +284,9 @@ namespace FalconUDP
                         // Could be the peer has not been added yet and is requesting to be added. 
                         // Or it could be we are asking to be added and peer is accepting!
 
-                        if (sizeReceived >= Const.NORMAL_HEADER_SIZE && receiveBuffer[1] == Const.JOIN_PACKET_INFO)
+                        if (type == PacketType.AddPeer)
                         {
                             string pass = null;
-                            byte payloadSize = receiveBuffer[2];
                             if (payloadSize > 0)
                                 pass = Settings.TextEncoding.GetString(receiveBuffer, Const.NORMAL_HEADER_SIZE, payloadSize);
 
@@ -241,10 +303,10 @@ namespace FalconUDP
                             else
                             {
                                 rp = AddPeer(ip);
-                                rp.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null);
+                                rp.BeginSend(SendOptions.Reliable, PacketType.AcceptJoin, null, null);
                             }
                         }
-                        else if (sizeReceived >= Const.NORMAL_HEADER_SIZE && (receiveBuffer[1] & (byte)PacketType.AcceptJoin) == (byte)PacketType.AcceptJoin)
+                        else if (type == PacketType.AcceptJoin)
                         {
                             AwaitingAcceptDetail detail;
                             if (!TryGetAndRemoveWaitingAcceptDetail(ip, out detail))
@@ -260,7 +322,7 @@ namespace FalconUDP
                             {
                                 // create the new peer, add the datagram to send ACK, call the callback
                                 rp = AddPeer(ip);
-                                rp.AddReceivedDatagram(sizeReceived, receiveBuffer);
+                                rp.AddReceivedPacket(seq, opts, type, payload);
                                 TryResult tr = new TryResult(true, null, null, rp.Id);
                                 detail.Callback(tr);
                             }
@@ -272,7 +334,7 @@ namespace FalconUDP
                     }
                     else
                     {
-                        rp.AddReceivedDatagram(sizeReceived, receiveBuffer);
+                        rp.AddReceivedPacket(seq, opts, type, payload);
                     }
                 }
                 catch (SocketException se)

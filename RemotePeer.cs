@@ -28,12 +28,11 @@ namespace FalconUDP
         private List<Packet> receivedPackets;                   // packets received from this peer not yet "read" by application
         private List<PacketDetail> sentPacketsAwaitingACK;
         private List<PacketDetail> sentPacketsAwaitingACKToRemove;
-        private byte[] sendBuffer;                              // buffer recycled for every packet sent to this peer
-        private int sendPacketSize;                             // the size of the current packet to be sent in SendBuffer
         private string peerName;                                // e.g. IP address, used internally for logging
         private byte[] payloadSizeBytes = new byte[2];          // buffer recycled for headers with payload size as ushort 
         private byte[] ackBuffer;
         private byte[] antiAckBuffer;
+        private object sendSeqCountLock;
         private object receivingPacketLock;
 
 #if NETFX_CORE
@@ -45,17 +44,15 @@ namespace FalconUDP
             this.localPeer              = localPeer;
             this.sendSeqCount           = 0;
             this.EndPoint               = endPoint;
-            this.sendPacketSize         = 0;
             this.UnreadPacketCount      = 0;
             this.receivedPackets        = new List<Packet>();
             this.sentPacketsAwaitingACK = new List<PacketDetail>();
             this.sentPacketsAwaitingACKToRemove = new List<PacketDetail>();
             this.peerName               = endPoint.ToString();
-            this.sendSeqCount           = 0;
             this.lastReceivedSeq        = 0;
             this.ackBuffer              = new byte[] { 0, Const.ACK_PACKET_INFO, 0 };
             this.antiAckBuffer          = new byte[] { 0, Const.ANTI_ACK_PACKET_INFO, 0 };
-            this.sendBuffer             = new byte[Const.MAX_DATAGRAM_SIZE];
+            this.sendSeqCountLock = new object();
             this.receivingPacketLock    = new object();
         }
 
@@ -83,7 +80,11 @@ namespace FalconUDP
                         else
                         {
                             // try again, re-send the packet
+#if NETFX_CORE
                             SendAsync(pd.RawPacket);
+#else
+                            BeginSend(pd.RawPacket);
+#endif
                             localPeer.Log(LogLevel.Info, String.Format("Packet to: {0} re-sent as not ACKnowledged in time.", this.EndPoint));
                         }
                     }
@@ -102,7 +103,12 @@ namespace FalconUDP
 
         internal void Ping()
         {
+#if NETFX_CORE
             SendAsync(Const.PING_PACKET);
+#else
+            BeginSend(Const.PING_PACKET);
+#endif
+
         }
         
         internal void BeginSend(SendOptions opts, PacketType type, byte[] payload, Action ackCallback)
@@ -122,49 +128,53 @@ namespace FalconUDP
                 }
             }
 
-            lock (sendBuffer)
+            // create a new raw packet from the parameters supplied
+
+            int sendPacketSize, payloadSize;
+            if (payload == null)
+            {
+                payloadSize = 0;
+                sendPacketSize = Const.NORMAL_HEADER_SIZE;
+            }
+            else
+            {
+                payloadSize = payload.Length;
+                if (hpst == HeaderPayloadSizeType.Byte)
+                    sendPacketSize = payload.Length + Const.NORMAL_HEADER_SIZE;
+                else
+                    sendPacketSize = payload.Length + Const.LARGE_HEADER_SIZE;
+            }
+
+            byte[] rawPacket = new byte[sendPacketSize];
+
+            lock (sendSeqCountLock)
             {
                 sendSeqCount++;
+                rawPacket[0] = sendSeqCount;
+                rawPacket[1] = (byte)((byte)hpst | (byte)opts | (byte)type);
 
-                sendBuffer[0] = sendSeqCount;
-                sendBuffer[1] = (byte)((byte)hpst | (byte)opts | (byte)type);
-
-                if (payload == null)
+                if (hpst == HeaderPayloadSizeType.Byte)
                 {
-                    sendBuffer[2] = 0;
-                    sendPacketSize = Const.NORMAL_HEADER_SIZE;
+                    rawPacket[2] = (byte)payloadSize;
+
+                    if (payloadSize > 0)
+                    {
+                        System.Buffer.BlockCopy(payload, 0, rawPacket, Const.NORMAL_HEADER_SIZE, payloadSize);
+                    }
                 }
                 else
                 {
-                    if (hpst == HeaderPayloadSizeType.Byte)
-                    {
-                        sendBuffer[2] = (byte)payload.Length;
-                        sendPacketSize = payload.Length + Const.NORMAL_HEADER_SIZE;
-                        System.Buffer.BlockCopy(payload, 0, sendBuffer, Const.NORMAL_HEADER_SIZE, payload.Length);
-                    }
-                    else
-                    {
-                        byte[] payloadSizeInBytes = BitConverter.GetBytes((ushort)payload.Length);
-                        sendBuffer[2] = payloadSizeInBytes[0];
-                        sendBuffer[3] = payloadSizeInBytes[1];
-                        sendPacketSize = payload.Length + Const.LARGE_HEADER_SIZE;
-                        System.Buffer.BlockCopy(payload, Const.LARGE_HEADER_SIZE, sendBuffer, Const.LARGE_HEADER_SIZE, payload.Length);
-                    }
+                    byte[] payloadSizeInBytes = BitConverter.GetBytes((ushort)payload.Length);
+                    rawPacket[2] = payloadSizeInBytes[0];
+                    rawPacket[3] = payloadSizeInBytes[1];
+                    System.Buffer.BlockCopy(payload, 0, rawPacket, Const.LARGE_HEADER_SIZE, payloadSize);
                 }
 
                 // If ACK required add detail - just before we send - to be sure we know about it when 
                 // we get the reply ACK.
 
-                byte[] rawPacket = null;
                 if ((opts & SendOptions.Reliable) == SendOptions.Reliable)
                 {
-                    // Unfortunatly we have to copy the send buffer at this point in case the packet 
-                    // needs to be re-sent at which point the send buffer will likely have been 
-                    // over-written.
-
-                    rawPacket = new byte[sendPacketSize];
-                    System.Buffer.BlockCopy(sendBuffer, 0, rawPacket, 0, sendPacketSize);
-
                     PacketDetail detail = new PacketDetail(rawPacket, ackCallback) { Sequence = sendSeqCount };
 
                     lock (sentPacketsAwaitingACK)
@@ -177,22 +187,13 @@ namespace FalconUDP
                     // it is an error to supply an ackCallback if not sending reliably...
                     localPeer.Log(LogLevel.Warning, String.Format("ACKCallback supplied in BeginSendTo() {0}, but SendOptions not Reliable - callback will never called.", peerName));
                 }
+            }
 
 #if NETFX_CORE
-                // http://social.msdn.microsoft.com/Forums/en-US/winappswithcsharp/thread/b1d490f7-a637-4648-925a-99fd7f55af1d
-
-                if(rawPacket == null)
-                {
-                    rawPacket = new byte[sendPacketSize];
-                    Array.Copy(sendBuffer, rawPacket, sendPacketSize);
-                }
-
-                SendAsync(rawPacket);
+            SendAsync(rawPacket);
 #else
-                __BeginSend__(sendBuffer, sendPacketSize);
+            BeginSend(rawPacket);
 #endif
-
-            }
         }
         
 #if NETFX_CORE
@@ -216,6 +217,7 @@ namespace FalconUDP
             {
                 // TODO is there a better way than creating a DataWriter every time? http://social.msdn.microsoft.com/Forums/en-US/winappswithcsharp/thread/0d321642-13bd-40d4-b83f-963638b0d5df/#0d321642-13bd-40d4-b83f-963638b0d5df
 
+                // TODO lock outStream
                 using (DataWriter dw = new DataWriter(outStream))
                 {
                     dw.WriteBytes(rawPacket);
@@ -230,24 +232,20 @@ namespace FalconUDP
         }
 
 #else
-        private void __BeginSend__(byte[] rawPacket)
-        {
-            __BeginSend__(rawPacket, rawPacket.Length);
-        }
 
-        private void __BeginSend__(byte[] rawPacket, int count)
+        private void BeginSend(byte[] rawPacket)
         {
             try
             {
-                localPeer.Sock.BeginSendTo(rawPacket, 0, count, SocketFlags.None, EndPoint, EndSendToCallback, null);
+                // TODO do we need ensure calls to BeginSendTo are not concurrent?
+                localPeer.Sock.BeginSendTo(rawPacket, 0, rawPacket.Length, SocketFlags.None, EndPoint, EndSendToCallback, null);
             }
             catch (SocketException se)
             {
-                // TODO
-                //sentPacketsAwaitingACK.RemoveAt(sentPacketsAwaitingACK.IndexOfValue(detail));
+                // TODO drop this peer?
+                localPeer.Log(LogLevel.Error, String.Format("BeginSendTo: {0}, Socket Exception: {1}.", peerName, se.Message));
             }
         }
-
 
         private void EndSendToCallback(IAsyncResult result)
         {
@@ -258,7 +256,7 @@ namespace FalconUDP
             catch (SocketException se)
             {
                 // TODO drop this peer?
-                localPeer.Log(LogLevel.Error, String.Format("Sending to: {0}, Socket Exception: {1}.", EndPoint, se.Message));
+                localPeer.Log(LogLevel.Error, String.Format("EndSendTo: {0}, Socket Exception: {1}.", peerName, se.Message));
             }
         }
 
@@ -272,7 +270,11 @@ namespace FalconUDP
                 {
                     case PacketType.Ping:
                         {
+#if NETFX_CORE
                             SendAsync(Const.PONG_PACKET);
+#else
+                            BeginSend(Const.PONG_PACKET);
+#endif
                             return;
                         }
                     case PacketType.Pong:
@@ -326,7 +328,11 @@ namespace FalconUDP
 
                                     detail.ACKTicks = 0;
                                     detail.ResentCount = 0;
+#if NETFX_CORE
                                     SendAsync(detail.RawPacket);
+#else
+                                    BeginSend(detail.RawPacket);
+#endif
                                 }
                             }
                         }
@@ -334,8 +340,8 @@ namespace FalconUDP
                     default:
                         {
                             // validate seq
-                            byte min = (byte)(lastReceivedSeq - Settings.OutOfOrderTolerance);
-                            byte max = (byte)(lastReceivedSeq + Settings.OutOfOrderTolerance);
+                            byte min = unchecked((byte)(lastReceivedSeq - Settings.OutOfOrderTolerance));
+                            byte max = unchecked((byte)(lastReceivedSeq + Settings.OutOfOrderTolerance));
 
                             // NOTE: Max could be less than min if exceeded Byte.MaxValue, likewise 
                             //       min could be greater than max if less than 0. So have to check 
@@ -355,7 +361,11 @@ namespace FalconUDP
                             if (reqReliable)
                             {
                                 ackBuffer[0] = seq;
+#if NETFX_CORE
                                 SendAsync(ackBuffer);
+#else
+                                BeginSend(ackBuffer);
+#endif
                             }
 
                             // If packet required to be in order check it is after the max seq already 

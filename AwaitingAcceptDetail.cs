@@ -1,9 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System.Net;
 
 namespace FalconUDP
 {
@@ -19,6 +14,7 @@ namespace FalconUDP
         internal int Ticks;
         internal string Pass;
         internal int RetryCount;
+        internal byte[] JoinPacket;
 
 #if NETFX_CORE
         internal AwaitingAcceptDetail(IPv4EndPoint ip, TryCallback callback, string pass)

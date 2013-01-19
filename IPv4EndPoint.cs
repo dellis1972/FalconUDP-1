@@ -34,7 +34,7 @@ namespace FalconUDP
                 throw new ArgumentException("Port must be a number between 0 - 65535");
             }
 
-            if (!TryParseIPv4Address(hostName.RawName, out this.ip))
+            if (!TryParseIPv4Address(addr, out this.ip))
             {
                 throw new ArgumentException("Invalid IPv4 adrress: " + addr);
             }
@@ -47,6 +47,27 @@ namespace FalconUDP
 
             this.hash = unchecked((int)this.ip) ^ this.port;
             this.asString = String.Format("{0}:{1}", hostName.CanonicalName, port);
+        }
+
+        internal static bool TryParse(string addr, string port, out IPv4EndPoint endPoint)
+        {
+            ushort portNum;
+            if (!UInt16.TryParse(port, out portNum))
+            {
+                endPoint = null;
+                return false;
+            }
+
+            uint ip;
+            if (!TryParseIPv4Address(addr, out ip))
+            {
+                endPoint = null;
+                return false;
+            }
+
+            endPoint = new IPv4EndPoint(addr, port);
+
+            return true;
         }
 
         internal static bool TryParseIPv4Address(string addr, out uint ip)
@@ -83,12 +104,10 @@ namespace FalconUDP
             return asString;
         }
 
-        internal bool Equal(IPv4EndPoint other)
+        public bool Equals(IPv4EndPoint other)
         {
             return this.ip == other.ip && this.port == other.port;
         }
-
-        // NOTE: We have not overriden Object.Equals(object), so reference equality is still used.
     }
 }
 #endif
