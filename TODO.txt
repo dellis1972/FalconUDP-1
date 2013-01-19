@@ -1,0 +1,7 @@
+- BYE PacketType (inc. reason in payload)
+- Tuncated bit and automatically fragment packets > MAX_DATAGRAM_SIZE? (only for reliable)
+- InOrder, ReliableInOrder
+- ReliableInOrder channels i.e. packets ReliableInOrder per channel in peer rather than just per peer.. How often will datagrams drop - is this worth it?
+- IPv6 and other underlying protocols support
+
+
